@@ -1,0 +1,27 @@
+# Line endings
+#
+# `text=auto` lets Git normalize text files to LF *in the repository* while
+# each checkout still follows that developer's own `core.autocrlf`. This keeps
+# the history free of CRLF noise regardless of the platform a contributor is
+# on, without forcing anyone's working tree to change.
+* text=auto
+
+# Windows shell scripts need CRLF to run correctly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never apply line-ending conversion or text diffing.
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.wav   binary
+*.mp3   binary
+*.ttf   binary
+*.woff  binary
+*.woff2 binary
+
+# Lockfiles are generated: keep them out of GitHub's language stats and
+# collapse them by default in pull request diffs. They are still committed.
+package-lock.json    linguist-generated=true
+src-tauri/Cargo.lock linguist-generated=true

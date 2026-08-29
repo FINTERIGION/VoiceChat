@@ -1,0 +1,45 @@
+[package]
+name = "voicechat"
+version = "0.1.0"
+description = "Real-time voice chat with customizable AI characters"
+authors = ["FINTERIGION"]
+license = "MIT"
+repository = "https://github.com/FINTERIGION/VoiceChat"
+edition = "2024"
+rust-version = "1.85"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "voicechat_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+keyring = { version = "4.1.6", default-features = false, features = ["windows-native-keyring-store", "v1"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+reqwest = { version = "0.13.4", features = ["json"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.26.0", features = ["v4"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+cpal = { version = "0.18.2", features = ["realtime"] }
+rubato = "5.0.0"
+base64 = "0.23.1"
+futures-util = "0.3.34"
+ringbuf = "0.5.1"
+hound = "3.5.1"
+tauri-plugin-global-shortcut = "2.3.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+audioadapter-buffers = "5.2.0"
+
