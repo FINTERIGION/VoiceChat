@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -92,12 +92,19 @@ pub fn delete(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub fn delete_all_for_character(conn: &Connection, character_id: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM memories WHERE character_id = ?1",
-        params![character_id],
-    )?;
-    Ok(())
+/// Deletes an explicit set of memories in one transaction, so a bulk delete
+/// from the manager either takes all of them or none. Chunked because a
+/// single statement can only carry so many bound parameters.
+pub fn delete_many(conn: &mut Connection, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    for chunk in ids.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        tx.execute(
+            &format!("DELETE FROM memories WHERE id IN ({placeholders})"),
+            params_from_iter(chunk),
+        )?;
+    }
+    tx.commit()
 }
 
 /// The rolling summary is a single row per character: replace, don't

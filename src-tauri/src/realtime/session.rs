@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -50,6 +50,10 @@ pub enum SessionCommand {
     /// Temporary per-conversation override for "本次对话不记录" — does not
     /// touch the character's stored `memory_enabled`.
     SetRecording(bool),
+    /// Ends the conversation currently being written to (naming and
+    /// summarizing it same as any other end) and opens a new one for the
+    /// same character. A no-op before any connection has opened one.
+    NewConversation,
     Shutdown,
 }
 
@@ -60,7 +64,18 @@ pub struct SessionHandle {
     /// anything else outside the Chat tab) can read current mic state
     /// synchronously instead of needing a round trip through the actor.
     mic_open: Arc<AtomicBool>,
+    /// Mirrors the actor's `conversation_id`: which history row the session
+    /// is writing to right now, or `None` when it isn't recording one. The
+    /// Chat tab reads it to mark that row as live, and
+    /// `delete_conversation` reads it to refuse deleting a conversation
+    /// still being written to.
+    active_conversation: ActiveConversation,
 }
+
+/// Shared so the naming task (which outlives the turn that started it) and
+/// the Chat tab's `get_active_conversation_id` see the same value the actor
+/// last set.
+type ActiveConversation = Arc<Mutex<Option<String>>>;
 
 impl SessionHandle {
     pub fn start_talking(&self) {
@@ -75,6 +90,12 @@ impl SessionHandle {
     pub fn mic_open(&self) -> bool {
         self.mic_open.load(Ordering::Acquire)
     }
+    pub fn active_conversation(&self) -> Option<String> {
+        self.active_conversation
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
     pub fn interrupt(&self) {
         let _ = self.tx.send(SessionCommand::Interrupt);
     }
@@ -84,6 +105,9 @@ impl SessionHandle {
     pub fn set_recording(&self, on: bool) {
         let _ = self.tx.send(SessionCommand::SetRecording(on));
     }
+    pub fn new_conversation(&self) {
+        let _ = self.tx.send(SessionCommand::NewConversation);
+    }
     pub fn shutdown(&self) {
         let _ = self.tx.send(SessionCommand::Shutdown);
     }
@@ -92,8 +116,18 @@ impl SessionHandle {
 pub fn spawn(app: AppHandle) -> SessionHandle {
     let (tx, rx) = mpsc::unbounded_channel();
     let mic_open = Arc::new(AtomicBool::new(false));
-    tauri::async_runtime::spawn(run(app, rx, mic_open.clone()));
-    SessionHandle { tx, mic_open }
+    let active_conversation: ActiveConversation = Arc::new(Mutex::new(None));
+    tauri::async_runtime::spawn(run(
+        app,
+        rx,
+        mic_open.clone(),
+        active_conversation.clone(),
+    ));
+    SessionHandle {
+        tx,
+        mic_open,
+        active_conversation,
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -249,6 +283,9 @@ enum Disconnect {
     /// Hit the turn/audio-duration cap; reconnect immediately with the same
     /// character (fresh instructions carry the just-written summary).
     Rolling,
+    /// User asked to close out the current conversation and start a fresh
+    /// one; reconnect immediately with the same character.
+    NewConversation,
 }
 
 fn persist_current_character(app: &AppHandle, character_id: &str) {
@@ -263,10 +300,31 @@ fn persist_current_character(app: &AppHandle, character_id: &str) {
     // connect or on an error/rolling reconnect of the same character), so
     // the Chat tab can use this — unlike `chat:state`'s `connecting`, which
     // fires on every reconnect — to know exactly when to drop the previous
-    // character's transcript bubbles. There is no backend chat history to
-    // reload them from, so without this the old conversation lingers on
-    // screen under the new character.
+    // character's transcript bubbles. The incoming character has no
+    // conversation open yet for the tab to replay in their place, so without
+    // this the old one lingers on screen under the new character.
     let _ = app.emit("chat:character", character_id);
+}
+
+/// Tells any open Chat tab that the history list may have changed, and
+/// which of its rows (if any) the live session is writing to right now.
+///
+/// The active id is read back through `AppState` rather than passed in, so
+/// every emitter — including ones several calls deep like `persist_message`
+/// — reports the same value the actor last set without having to thread the
+/// mirror through.
+fn emit_conversations(app: &AppHandle) {
+    let active_id = app.state::<AppState>().session.active_conversation();
+    let _ = app.emit("chat:conversations", active_id);
+}
+
+/// Points the mirror at `id` (or clears it) and notifies the frontend.
+fn set_active_conversation(app: &AppHandle, active: &ActiveConversation, id: Option<String>) {
+    match active.lock() {
+        Ok(mut guard) => *guard = id,
+        Err(e) => tracing::error!("active conversation lock poisoned: {e}"),
+    }
+    emit_conversations(app);
 }
 
 fn persist_message(app: &AppHandle, conversation_id: &str, role: &str, text: &str) {
@@ -276,21 +334,103 @@ fn persist_message(app: &AppHandle, conversation_id: &str, role: &str, text: &st
     });
     if let Err(e) = result {
         tracing::error!("failed to persist message: {e}");
+        return;
+    }
+    // A conversation only enters the history list once it holds something,
+    // and its row shows how much was said and what it opened with — all of
+    // which just changed.
+    emit_conversations(app);
+}
+
+/// Gives a conversation its name in the history list.
+///
+/// A no-op once it has one, so this can run both mid-conversation (as soon
+/// as there is a turn to name it after, which is what keeps the newest row
+/// from sitting unnamed for the whole session) and again when it ends,
+/// without the second call overwriting the first — or overwriting a name
+/// the user typed themselves.
+async fn name_conversation(app: AppHandle, character_name: String, conversation_id: String) {
+    let (messages, api_key, workspace_id, region) = {
+        let state = app.state::<AppState>();
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("db lock failed while naming conversation: {e}");
+                return;
+            }
+        };
+        // Also false for a conversation that no longer exists (deleted from
+        // the history list while it was still being named).
+        match message_store::is_untitled(&conn, &conversation_id) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::error!("failed to read conversation title: {e}");
+                return;
+            }
+        }
+        let messages = match message_store::list_messages(&conn, &conversation_id) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("failed to list messages for naming: {e}");
+                return;
+            }
+        };
+        let workspace_id = db::get_setting(&conn, "workspace_id").ok().flatten();
+        let region = db::get_setting(&conn, "region").ok().flatten();
+        (messages, secrets::get_api_key(), workspace_id, region)
+    };
+
+    let Some(api_key) = api_key else {
+        return;
+    };
+    let client = FlashClient::new(api_key, workspace_id, region.as_deref());
+    let title = match memory::generate_title(&client, &character_name, &messages).await {
+        Ok(t) => t,
+        Err(e) => {
+            // Leaves the row labelled by its opening line, which is still
+            // readable — not worth failing anything louder over.
+            tracing::warn!("conversation naming failed: {e}");
+            return;
+        }
+    };
+
+    let stored = {
+        let state = app.state::<AppState>();
+        state.db.lock().map_err(|e| e.to_string()).and_then(|conn| {
+            message_store::set_title_if_untitled(&conn, &conversation_id, &title)
+                .map_err(|e| e.to_string())
+        })
+    };
+    match stored {
+        // `false` means it picked up a name while this call was in flight —
+        // a hand-typed one, or a concurrent naming attempt. Either way the
+        // list already shows it, so there is nothing to announce.
+        Ok(true) => emit_conversations(&app),
+        Ok(false) => {}
+        Err(e) => tracing::error!("failed to store conversation title: {e}"),
     }
 }
 
-/// Ends the conversation row and, if it has any content, summarizes it into
-/// `memories` (rolling summary + facts). Called on every disconnect, not
-/// just clean ones, so a flaky connection still keeps whatever was actually
-/// said — it just costs an extra summarization call instead of losing
-/// continuity.
-async fn finalize_conversation(app: &AppHandle, character_id: &str, character_name: &str, conversation_id: &str) {
+/// Writes what was said into `memories` (rolling summary + facts), leaving
+/// the conversation row itself open.
+///
+/// Split out from `finalize_conversation` because a rolling reconnect needs
+/// the summary — it is what the next connection's instructions are built
+/// from, the server-side context being exactly what just ran out — but must
+/// not end the conversation, which the user is still in the middle of.
+async fn summarize_into_memory(
+    app: &AppHandle,
+    character_id: &str,
+    character_name: &str,
+    conversation_id: &str,
+) {
     let (messages, previous_summary, api_key, workspace_id, region) = {
         let state = app.state::<AppState>();
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("db lock failed during conversation finalize: {e}");
+                tracing::error!("db lock failed during conversation summarize: {e}");
                 return;
             }
         };
@@ -304,9 +444,6 @@ async fn finalize_conversation(app: &AppHandle, character_id: &str, character_na
             .map(|m| m.content);
         let workspace_id = db::get_setting(&conn, "workspace_id").ok().flatten();
         let region = db::get_setting(&conn, "region").ok().flatten();
-        if let Err(e) = message_store::end_conversation(&conn, conversation_id) {
-            tracing::error!("failed to end conversation: {e}");
-        }
         (messages, previous_summary, secrets::get_api_key(), workspace_id, region)
     };
 
@@ -334,6 +471,70 @@ async fn finalize_conversation(app: &AppHandle, character_id: &str, character_na
     }
 }
 
+/// Ends the conversation row and, if it has any content, summarizes it into
+/// `memories`.
+///
+/// Called when the session is genuinely done writing to this row — not on a
+/// dropped-socket or rolling reconnect, which carries on with the same
+/// conversation (see `CarriedConversation`). It still runs on unclean ends
+/// like an idle timeout, so those keep whatever was actually said.
+async fn finalize_conversation(app: &AppHandle, character_id: &str, character_name: &str, conversation_id: &str) {
+    // Catches conversations that ended before the mid-session naming pass
+    // could run (a single turn, or one where it failed); returns immediately
+    // for the rest.
+    name_conversation(app.clone(), character_name.to_string(), conversation_id.to_string()).await;
+
+    {
+        let state = app.state::<AppState>();
+        match state.db.lock() {
+            Ok(conn) => {
+                if let Err(e) = message_store::end_conversation(&conn, conversation_id) {
+                    tracing::error!("failed to end conversation: {e}");
+                }
+            }
+            Err(e) => tracing::error!("db lock failed ending conversation: {e}"),
+        }
+    }
+
+    summarize_into_memory(app, character_id, character_name, conversation_id).await;
+}
+
+/// A conversation row held open across a reconnect the user never asked
+/// for. Carries the character it belongs to, so a connection that came back
+/// on a different one appends to a fresh row instead of the wrong history.
+struct CarriedConversation {
+    id: String,
+    character_id: String,
+    character_name: String,
+    /// The `SetRecording` choice this conversation was left with. "本次对话
+    /// 不记录" is a decision about the conversation, so it has to outlive the
+    /// connection that happened to be carrying it.
+    recording: bool,
+}
+
+/// Opens the history row this connection writes to, or `None` when nothing
+/// is being recorded.
+fn start_conversation_row(app: &AppHandle, character_id: &str, recording: bool) -> Option<String> {
+    if !recording {
+        return None;
+    }
+    let state = app.state::<AppState>();
+    let conn = match state.db.lock() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::error!("db lock failed starting conversation: {e}");
+            return None;
+        }
+    };
+    match message_store::start_conversation(&conn, character_id) {
+        Ok(c) => Some(c.id),
+        Err(e) => {
+            tracing::error!("failed to start conversation: {e}");
+            None
+        }
+    }
+}
+
 struct Connected {
     sink: WsSink,
     source: WsSource,
@@ -350,6 +551,7 @@ async fn run(
     app: AppHandle,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     mic_open: Arc<AtomicBool>,
+    active_conversation: ActiveConversation,
 ) {
     let (capture_ctrl, mut frame_rx, mut level_rx) = match capture::start() {
         Ok((ctrl, frame_rx, level_rx)) => (Some(ctrl), Some(frame_rx), Some(level_rx)),
@@ -374,6 +576,10 @@ async fn run(
     // for reasons the user never triggered. Left `false` for
     // `SwitchCharacter`, which already closes the mic explicitly.
     let mut carried_talking = false;
+    // The conversation row a dropped connection was writing to, held across
+    // the reconnect so the next one carries on with it. `None` whenever the
+    // last disconnect genuinely ended the conversation.
+    let mut carried_conversation: Option<CarriedConversation> = None;
 
     'outer: loop {
         let initial_talking = if auto_reconnect {
@@ -393,7 +599,8 @@ async fn run(
                     }
                     Some(SessionCommand::StopTalking)
                     | Some(SessionCommand::Interrupt)
-                    | Some(SessionCommand::SetRecording(_)) => {}
+                    | Some(SessionCommand::SetRecording(_))
+                    | Some(SessionCommand::NewConversation) => {}
                 }
             }
         };
@@ -422,27 +629,42 @@ async fn run(
             }
         };
         reconnect_delay = RECONNECT_MIN;
+
+        let carried = match carried_conversation.take() {
+            // Carried into a connection it no longer belongs to — the current
+            // character changed while reconnecting, or memory was switched
+            // off for this one in the editor meanwhile. Close the row out
+            // rather than leaving it open forever.
+            Some(carried) if carried.character_id != character_id || !memory_enabled => {
+                finalize_conversation(
+                    &app,
+                    &carried.character_id,
+                    &carried.character_name,
+                    &carried.id,
+                )
+                .await;
+                None
+            }
+            same_conversation => same_conversation,
+        };
+        // `recording` arrives here as the character's `memory_enabled`, which
+        // keeps the last word — but within that, a resumed conversation keeps
+        // the choice it was left with. An opt-out that lasted only until the
+        // next dropped socket was never really an opt-out.
+        if let Some(carried) = &carried {
+            recording = recording && carried.recording;
+        }
         emit_recording(&app, memory_enabled.then_some(recording));
 
-        let mut conversation_id: Option<String> = if recording {
-            let state = app.state::<AppState>();
-            
-            match state.db.lock() {
-                Ok(conn) => match message_store::start_conversation(&conn, &character_id) {
-                    Ok(c) => Some(c.id),
-                    Err(e) => {
-                        tracing::error!("failed to start conversation: {e}");
-                        None
-                    }
-                },
-                Err(e) => {
-                    tracing::error!("db lock failed starting conversation: {e}");
-                    None
-                }
-            }
-        } else {
-            None
+        let mut conversation_id: Option<String> = match carried {
+            // Keep writing to the row the dropped connection opened, so a
+            // sitting the user never saw interrupted stays one row in the
+            // history list. Kept even while recording is paused: the row is
+            // what a later `SetRecording(true)` goes back to writing into.
+            Some(carried) => Some(carried.id),
+            None => start_conversation_row(&app, &character_id, recording),
         };
+        set_active_conversation(&app, &active_conversation, conversation_id.clone());
 
         let mut is_talking = initial_talking;
         let mut is_responding = false;
@@ -466,6 +688,11 @@ async fn run(
         let mut turn_count: u32 = 0;
         let mut captured_ms: u64 = 0;
         let mut pending_roll = false;
+        // One naming attempt per connection: the first turn is enough to
+        // name a conversation after, and a second attempt would only
+        // discover it is already named. A failed attempt isn't retried here
+        // either — `finalize_conversation` gets the last word.
+        let mut naming_started = false;
         // Diagnostic only: gap between consecutive audio.delta events, to
         // tell server/network delivery jitter apart from local playback
         // issues. Remove once the playback-stutter report is resolved.
@@ -541,6 +768,11 @@ async fn run(
                                 emit_recording(&app, Some(recording));
                             }
                         }
+                        Some(SessionCommand::NewConversation) => {
+                            if let Some(p) = &playback_handle { p.clear(); }
+                            let _ = sink.close().await;
+                            break Disconnect::NewConversation;
+                        }
                     }
                 }
                 frame = recv_frame(&mut frame_rx) => {
@@ -549,7 +781,7 @@ async fn run(
                         captured_ms += 20;
                         let audio = base64::engine::general_purpose::STANDARD.encode(&bytes);
                         if client::send_event(&mut sink, &ClientEvent::InputAudioBufferAppend { audio }).await.is_err() {
-                            break Disconnect::Error("音频发送失败".into());
+                            break Disconnect::Error(crate::tr!("Failed to send audio", "音频发送失败").into());
                         }
                     }
                 }
@@ -586,8 +818,24 @@ async fn run(
                                 ServerAction::CommitTurn => {
                                     tracing::info!("vad speech stopped: sending input_audio_buffer.commit");
                                     if commit_turn(&mut sink).await.is_err() {
-                                        break Disconnect::Error("发送请求失败".into());
+                                        break Disconnect::Error(crate::tr!("Failed to send the request", "发送请求失败").into());
                                     }
+                                }
+                            }
+                            // As soon as one turn has been said and
+                            // answered there is enough to name the
+                            // conversation after — waiting until it ends
+                            // would leave the history list's newest row
+                            // labelled only by its opening line for the
+                            // whole session.
+                            if !naming_started && !is_responding && turn_count >= 1 {
+                                if let Some(id) = &conversation_id {
+                                    naming_started = true;
+                                    tauri::async_runtime::spawn(name_conversation(
+                                        app.clone(),
+                                        character_name.clone(),
+                                        id.clone(),
+                                    ));
                                 }
                             }
                             if pending_roll && !is_responding {
@@ -595,7 +843,7 @@ async fn run(
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
-                            break Disconnect::Error("连接已断开".into());
+                            break Disconnect::Error(crate::tr!("Connection closed", "连接已断开").into());
                         }
                         Some(Ok(_)) => {}
                         Some(Err(e)) => {
@@ -610,8 +858,35 @@ async fn run(
             c.set_capturing(false);
         }
 
+        // A reconnect nobody asked for — a dropped socket, or the turn/audio
+        // cap rolling the session — is invisible to the user, who is still in
+        // the same conversation. Ending the row here is what used to split one
+        // sitting into a string of short conversations, plus (the server drops
+        // the socket after a few minutes of silence) a pile of empty ones.
+        // Every other reason really has ended it.
+        let carry_conversation = matches!(&reason, Disconnect::Error(_) | Disconnect::Rolling);
+
         if let Some(conv_id) = conversation_id.take() {
-            finalize_conversation(&app, &character_id, &character_name, &conv_id).await;
+            if carry_conversation {
+                // Rolling means the server-side context ran out, so the next
+                // connection's instructions have to carry the conversation
+                // instead. The row itself stays open, and stays live.
+                if matches!(&reason, Disconnect::Rolling) {
+                    summarize_into_memory(&app, &character_id, &character_name, &conv_id).await;
+                }
+                carried_conversation = Some(CarriedConversation {
+                    id: conv_id,
+                    character_id: character_id.clone(),
+                    character_name: character_name.clone(),
+                    recording,
+                });
+            } else {
+                // The session has stopped writing to this conversation, so the
+                // Chat tab should stop showing its row as live now rather than
+                // after the naming and summarization round trips below.
+                set_active_conversation(&app, &active_conversation, None);
+                finalize_conversation(&app, &character_id, &character_name, &conv_id).await;
+            }
         }
 
         match reason {
@@ -632,6 +907,10 @@ async fn run(
             }
             Disconnect::Rolling => {
                 tracing::info!("rolling session: turn/duration cap reached, reconnecting");
+                auto_reconnect = true;
+                carried_talking = is_talking;
+            }
+            Disconnect::NewConversation => {
                 auto_reconnect = true;
                 carried_talking = is_talking;
             }
@@ -658,7 +937,7 @@ async fn recv_level(rx: &mut Option<capture::LevelReceiver>) -> Option<f32> {
 }
 
 async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
-    let api_key = secrets::get_api_key().ok_or_else(|| "尚未配置 API Key".to_string())?;
+    let api_key = secrets::get_api_key().ok_or_else(|| crate::tr!("No API key configured yet", "尚未配置 API Key").to_string())?;
     let (workspace_id, region, current_char, vad_threshold, vad_silence_ms) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -666,10 +945,10 @@ async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
         let region = db::get_setting(&conn, "region").map_err(|e| e.to_string())?;
         let char_id = db::get_setting(&conn, "current_character_id")
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "尚未选择角色".to_string())?;
+            .ok_or_else(|| crate::tr!("No character selected", "尚未选择角色").to_string())?;
         let character = character::get(&conn, &char_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "角色不存在".to_string())?;
+            .ok_or_else(|| crate::tr!("Character not found", "角色不存在").to_string())?;
         // Hands-free voice detection is a user preference (mic/environment
         // dependent), not a character trait, so it lives in the global
         // `settings` table rather than on the character row.
@@ -960,7 +1239,7 @@ fn handle_server_event(
                 (Some(code), Some(msg)) => format!("[{code}] {msg}"),
                 (None, Some(msg)) => msg,
                 (Some(code), None) => code,
-                (None, None) => "未知错误".to_string(),
+                (None, None) => crate::tr!("Unknown error", "未知错误").to_string(),
             };
             emit_state(app, ChatState::Error(message));
             ServerAction::None

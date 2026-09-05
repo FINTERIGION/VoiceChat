@@ -1,12 +1,30 @@
 import { useEffect, useState } from "react";
 import ConfirmDialog from "../components/ConfirmDialog";
+import {
+  isUiLanguage,
+  UI_LANGUAGES,
+  useI18n,
+  type UiLanguage,
+} from "../lib/i18n";
 import { ipc } from "../lib/ipc";
 import type { ManagedVoice, RegionOption, SecretStatus } from "../lib/types";
+import { btn } from "../lib/ui";
 
 type TestState =
   | { kind: "idle" }
   | { kind: "pending" }
   | { kind: "success" }
+  | { kind: "error"; message: string };
+
+/**
+ * Saving connection settings can fail validation now — a workspace id that
+ * isn't one — and that reason has to reach the user, so unlike the other
+ * save indicators on this page this one carries the message rather than
+ * collapsing to a generic failure.
+ */
+type SaveState =
+  | { kind: "idle" }
+  | { kind: "saved" }
   | { kind: "error"; message: string };
 
 const MODIFIER_CODES = new Set([
@@ -21,14 +39,14 @@ const MODIFIER_CODES = new Set([
 ]);
 
 export default function Settings() {
+  const { lang, setLang, t } = useI18n();
+  const [langError, setLangError] = useState(false);
   const [status, setStatus] = useState<SecretStatus | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
   const [region, setRegion] = useState("");
   const [regions, setRegions] = useState<RegionOption[]>([]);
-  const [saveState, setSaveState] = useState<"idle" | "saved" | "error">(
-    "idle",
-  );
+  const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
   const [testState, setTestState] = useState<TestState>({ kind: "idle" });
   const [vadThreshold, setVadThreshold] = useState(0.5);
   const [vadSilenceMs, setVadSilenceMs] = useState(800);
@@ -46,24 +64,80 @@ export default function Settings() {
   const [voicesError, setVoicesError] = useState<string | null>(null);
   const [deletingVoiceId, setDeletingVoiceId] = useState<string | null>(null);
   const [pendingVoiceId, setPendingVoiceId] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState<"export" | "import" | null>(
+    null,
+  );
+  const [backupResult, setBackupResult] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [confirmingRestore, setConfirmingRestore] = useState(false);
+  const [confirmingExport, setConfirmingExport] = useState(false);
+  // Default on: the reason to make a backup is to be up and running on the
+  // other machine, and that needs the key. The box is only offered when
+  // there is a key to include, and only matters for the user handing the
+  // file to someone else.
+  const [includeApiKey, setIncludeApiKey] = useState(true);
+  // With no key configured there is nothing to include whatever the box
+  // says, and the box isn't shown.
+  const withApiKey = includeApiKey && !!status?.configured;
 
   async function refreshStatus() {
     setStatus(await ipc.getSecretStatus());
   }
 
+  /**
+   * Every field on this page, read back from the backend. Called on mount,
+   * and again after a restore — which can have replaced all of them at once,
+   * and would otherwise leave the page showing the settings of the device
+   * the backup came off.
+   *
+   * Never rejects: these are local reads, and the one caller that has
+   * something to say — the restore — must not have its own result replaced
+   * by a complaint about re-reading a text box.
+   */
+  async function loadSettings() {
+    try {
+      const [secret, connection, vad, storedHotkey, storedLang] =
+        await Promise.all([
+          ipc.getSecretStatus(),
+          ipc.getConnectionSettings(),
+          ipc.getVadSettings(),
+          ipc.getHotkey(),
+          ipc.getUiLanguage(),
+        ]);
+      setStatus(secret);
+      setWorkspaceId(connection.workspace_id ?? "");
+      setRegion(connection.region ?? "");
+      setVadThreshold(vad.threshold);
+      setVadSilenceMs(vad.silence_ms);
+      setHotkey(storedHotkey);
+      // Writes back the value it just read, which is what re-renders the app
+      // in the restored language; the backend is already speaking it.
+      if (isUiLanguage(storedLang) && storedLang !== lang) {
+        await setLang(storedLang);
+      }
+    } catch (e) {
+      console.error("couldn't read the settings back", e);
+    }
+  }
+
   useEffect(() => {
-    refreshStatus();
-    ipc.getConnectionSettings().then((s) => {
-      setWorkspaceId(s.workspace_id ?? "");
-      setRegion(s.region ?? "");
-    });
-    ipc.listRegions().then(setRegions);
-    ipc.getVadSettings().then((s) => {
-      setVadThreshold(s.threshold);
-      setVadSilenceMs(s.silence_ms);
-    });
-    ipc.getHotkey().then(setHotkey);
+    loadSettings();
   }, []);
+
+  // Region labels are produced by the backend in the current display
+  // language, so they have to be re-fetched whenever that changes.
+  useEffect(() => {
+    ipc.listRegions().then(setRegions);
+  }, [lang]);
+
+  async function handleLanguageChange(next: UiLanguage) {
+    setLangError(false);
+    try {
+      await setLang(next);
+    } catch {
+      setLangError(true);
+    }
+  }
 
   async function refreshVoices() {
     setVoicesLoading(true);
@@ -94,9 +168,67 @@ export default function Settings() {
     } finally {
       setDeletingVoiceId(null);
       // Dismissed here rather than when the button is pressed, so the dialog
-      // stays up in its "处理中…" state for as long as the request is really
+      // stays up in its "working" state for as long as the request is really
       // running — deleting a voice is a round trip to DashScope, not instant.
       setPendingVoiceId(null);
+    }
+  }
+
+  async function handleExportBackup() {
+    setBackupBusy("export");
+    setBackupError(null);
+    setBackupResult(null);
+    try {
+      const done = await ipc.exportBackup(withApiKey);
+      // `null` is the save dialog dismissed — nothing happened, so say
+      // nothing.
+      if (done) {
+        setBackupResult(
+          t("settings.backup.exported", { ...done.totals, path: done.path }),
+        );
+      }
+    } catch (e) {
+      setBackupError(String(e));
+    } finally {
+      setBackupBusy(null);
+      // Dismissed only once the native save dialog has been answered, so the
+      // confirmation doesn't vanish and leave a system dialog on screen with
+      // nothing explaining it.
+      setConfirmingExport(false);
+    }
+  }
+
+  async function handleImportBackup() {
+    setBackupBusy("import");
+    setBackupError(null);
+    setBackupResult(null);
+    try {
+      const done = await ipc.importBackup();
+      if (done) {
+        const restored = t("settings.backup.imported", {
+          ...done.totals,
+          added: done.new_characters,
+        });
+        const settings = done.api_key_restored
+          ? t("settings.backup.importedWithKey")
+          : done.settings_restored
+            ? t("settings.backup.importedWithSettings")
+            : "";
+        setBackupResult(settings ? `${restored} ${settings}` : restored);
+      }
+    } catch (e) {
+      setBackupError(String(e));
+    } finally {
+      // The file has just rewritten the API key, workspace, region, hotkey,
+      // sensitivity and display language out from under this page. Read back
+      // even when the import reported a failure: one that only couldn't
+      // store the key still applied everything else.
+      await loadSettings();
+      setBackupBusy(null);
+      // Dismissed only once the file picker it opened has been answered, so
+      // the confirmation doesn't vanish and leave a native dialog on screen
+      // with nothing explaining it.
+      setConfirmingRestore(false);
     }
   }
 
@@ -165,10 +297,10 @@ export default function Settings() {
         workspace_id: workspaceId.trim() || null,
         region: region.trim() || null,
       });
-      setSaveState("saved");
-      setTimeout(() => setSaveState("idle"), 1500);
-    } catch {
-      setSaveState("error");
+      setSaveState({ kind: "saved" });
+      setTimeout(() => setSaveState({ kind: "idle" }), 1500);
+    } catch (e) {
+      setSaveState({ kind: "error", message: String(e) });
     }
   }
 
@@ -184,19 +316,40 @@ export default function Settings() {
 
   return (
     <div className="mx-auto max-w-xl space-y-8 p-8 text-neutral-100">
-      <h1 className="text-xl font-semibold">设置</h1>
+      <h1 className="text-xl font-semibold">{t("settings.title")}</h1>
 
       <section className="space-y-3">
         <h2 className="text-sm font-medium text-neutral-400">
-          DashScope API Key
+          {t("settings.language.heading")}
+        </h2>
+        <select
+          value={lang}
+          onChange={(e) => handleLanguageChange(e.target.value as UiLanguage)}
+          className="w-full max-w-xs rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
+        >
+          {UI_LANGUAGES.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-neutral-500">{t("settings.language.hint")}</p>
+        {langError && (
+          <p className="text-xs text-red-400">{t("common.saveFailed")}</p>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-medium text-neutral-400">
+          {t("settings.apiKey.heading")}
         </h2>
 
         <p className="text-sm text-neutral-300">
           {status === null
-            ? "加载中…"
+            ? t("common.loading")
             : status.configured
-              ? `已配置（${status.tail}）`
-              : "尚未配置"}
+              ? t("settings.apiKey.configured", { tail: status.tail ?? "" })
+              : t("settings.apiKey.missing")}
         </p>
 
         <div className="flex gap-2">
@@ -210,38 +363,40 @@ export default function Settings() {
           <button
             onClick={handleSaveApiKey}
             disabled={!apiKeyInput.trim()}
-            className="rounded bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 disabled:opacity-40"
+            className={`${btn.primary} px-3 py-2 text-sm font-medium`}
           >
-            保存
+            {t("common.save")}
           </button>
           {status?.configured && (
             <button
               onClick={handleClearApiKey}
-              className="rounded border border-neutral-700 px-3 py-2 text-sm text-neutral-300"
+              className={`${btn.outline} px-3 py-2 text-sm`}
             >
-              清除
+              {t("settings.apiKey.clear")}
             </button>
           )}
         </div>
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-sm font-medium text-neutral-400">可选配置</h2>
+        <h2 className="text-sm font-medium text-neutral-400">
+          {t("settings.optional.heading")}
+        </h2>
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="mb-1 block text-xs text-neutral-500">
-              WorkspaceId
+              {t("settings.optional.workspaceId")}
             </label>
             <input
               value={workspaceId}
               onChange={(e) => setWorkspaceId(e.target.value)}
-              placeholder="留空使用旧域名"
+              placeholder={t("settings.optional.workspacePlaceholder")}
               className="w-full rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
             />
           </div>
           <div>
             <label className="mb-1 block text-xs text-neutral-500">
-              地域
+              {t("settings.optional.region")}
             </label>
             <select
               value={region}
@@ -249,7 +404,11 @@ export default function Settings() {
               className="w-full rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
             >
               <option value="">
-                默认（{regions.find((r) => r.id === "cn-beijing")?.label ?? "北京"}）
+                {t("settings.optional.regionDefault", {
+                  label:
+                    regions.find((r) => r.id === "cn-beijing")?.label ??
+                    t("settings.optional.regionFallback"),
+                })}
               </option>
               {regions
                 .filter((r) => r.id !== "cn-beijing")
@@ -261,34 +420,49 @@ export default function Settings() {
             </select>
           </div>
         </div>
-        <p className="text-xs text-neutral-500">
-          语音克隆/设计和实时对话目前仅在这两个地域可用，选择离你更近的地域可以降低延迟。切换后需要重新测试连通性。
-        </p>
-        <div className="flex items-center gap-3">
+        <p className="text-xs text-neutral-500">{t("settings.optional.hint")}</p>
+        <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={handleSaveConnectionSettings}
-            className="rounded border border-neutral-700 px-3 py-2 text-sm text-neutral-300"
+            className={`${btn.outline} px-3 py-2 text-sm`}
           >
-            保存配置
+            {t("settings.saveConfig")}
           </button>
-          {saveState === "saved" && (
-            <span className="text-xs text-emerald-400">已保存</span>
-          )}
-          {saveState === "error" && (
-            <span className="text-xs text-red-400">保存失败</span>
+          <button
+            onClick={handleTestConnectivity}
+            disabled={testState.kind === "pending" || !status?.configured}
+            className={`${btn.primary} px-3 py-2 text-sm font-medium`}
+          >
+            {testState.kind === "pending"
+              ? t("settings.connectivity.testing")
+              : t("settings.connectivity.test")}
+          </button>
+          {saveState.kind === "saved" && (
+            <span className="text-xs text-emerald-400">{t("common.saved")}</span>
           )}
         </div>
+        {saveState.kind === "error" && (
+          <p className="text-sm text-red-400">{saveState.message}</p>
+        )}
+        {testState.kind === "success" && (
+          <p className="text-sm text-emerald-400">
+            {t("settings.connectivity.ok")}
+          </p>
+        )}
+        {testState.kind === "error" && (
+          <p className="text-sm text-red-400">✗ {testState.message}</p>
+        )}
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-sm font-medium text-neutral-400">免提检测</h2>
-        <p className="text-xs text-neutral-500">
-          控制麦克风开着的时候，多灵敏能听出你在说话、停顿多久算你说完了。
-        </p>
+        <h2 className="text-sm font-medium text-neutral-400">
+          {t("settings.vad.heading")}
+        </h2>
+        <p className="text-xs text-neutral-500">{t("settings.vad.hint")}</p>
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="mb-1 block text-xs text-neutral-500">
-              VAD 阈值 ({vadThreshold.toFixed(2)})
+              {t("settings.vad.threshold", { value: vadThreshold.toFixed(2) })}
             </label>
             <input
               type="range"
@@ -302,7 +476,7 @@ export default function Settings() {
           </div>
           <div>
             <label className="mb-1 block text-xs text-neutral-500">
-              静音判定 ({vadSilenceMs}ms)
+              {t("settings.vad.silence", { ms: vadSilenceMs })}
             </label>
             <input
               type="range"
@@ -318,47 +492,49 @@ export default function Settings() {
         <div className="flex items-center gap-3">
           <button
             onClick={handleSaveVadSettings}
-            className="rounded border border-neutral-700 px-3 py-2 text-sm text-neutral-300"
+            className={`${btn.outline} px-3 py-2 text-sm`}
           >
-            保存配置
+            {t("settings.saveConfig")}
           </button>
           {vadSaveState === "saved" && (
-            <span className="text-xs text-emerald-400">已保存</span>
+            <span className="text-xs text-emerald-400">{t("common.saved")}</span>
           )}
           {vadSaveState === "error" && (
-            <span className="text-xs text-red-400">保存失败</span>
+            <span className="text-xs text-red-400">{t("common.saveFailed")}</span>
           )}
         </div>
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-sm font-medium text-neutral-400">全局快捷键</h2>
-        <p className="text-xs text-neutral-500">
-          在任意窗口按一下即可开关麦克风。点击下面的按钮，然后按下想要的按键组合。
-        </p>
+        <h2 className="text-sm font-medium text-neutral-400">
+          {t("settings.hotkey.heading")}
+        </h2>
+        <p className="text-xs text-neutral-500">{t("settings.hotkey.hint")}</p>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setCapturingHotkey(true)}
-            className="min-w-[10rem] rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-left text-sm text-neutral-200"
+            className={`${btn.outline} min-w-[10rem] bg-neutral-900 px-3 py-2 text-sm`}
           >
-            {capturingHotkey ? "请按下新快捷键…" : (hotkey ?? "未设置")}
+            {capturingHotkey
+              ? t("settings.hotkey.capturing")
+              : (hotkey ?? t("common.notSet"))}
           </button>
           <button
             onClick={() => setHotkey(null)}
             disabled={hotkey === null}
-            className="rounded border border-neutral-700 px-3 py-2 text-sm text-neutral-300 disabled:opacity-40"
+            className={`${btn.outline} px-3 py-2 text-sm`}
           >
-            禁用
+            {t("settings.hotkey.disable")}
           </button>
           <button
             onClick={handleSaveHotkey}
-            className="rounded bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900"
+            className={`${btn.primary} px-3 py-2 text-sm font-medium`}
           >
-            保存
+            {t("common.save")}
           </button>
         </div>
         {hotkeySaveState === "saved" && (
-          <span className="text-xs text-emerald-400">已保存</span>
+          <span className="text-xs text-emerald-400">{t("common.saved")}</span>
         )}
         {hotkeySaveState === "error" && (
           <p className="text-sm text-red-400">{hotkeyError}</p>
@@ -366,49 +542,37 @@ export default function Settings() {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-sm font-medium text-neutral-400">连通性测试</h2>
-        <button
-          onClick={handleTestConnectivity}
-          disabled={testState.kind === "pending" || !status?.configured}
-          className="rounded bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 disabled:opacity-40"
-        >
-          {testState.kind === "pending" ? "测试中…" : "测试连通性"}
-        </button>
-        {testState.kind === "success" && (
-          <p className="text-sm text-emerald-400">✓ 连接成功</p>
-        )}
-        {testState.kind === "error" && (
-          <p className="text-sm text-red-400">✗ {testState.message}</p>
-        )}
-      </section>
-
-      <section className="space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-medium text-neutral-400">音色管理</h2>
+          <h2 className="text-sm font-medium text-neutral-400">
+            {t("settings.voices.heading")}
+          </h2>
           <button
             onClick={refreshVoices}
             disabled={voicesLoading || !status?.configured}
-            className="text-xs text-neutral-500 hover:text-neutral-300 disabled:opacity-40"
+            className={`${btn.quiet} px-2 py-1 text-xs`}
           >
-            {voicesLoading ? "刷新中…" : "刷新"}
+            {voicesLoading
+              ? t("settings.voices.refreshing")
+              : t("settings.voices.refresh")}
           </button>
         </div>
-        <p className="text-xs text-neutral-500">
-          通过「录音复刻」「文本设计」创建的自定义音色，保存在你的 DashScope
-          账号下。已被角色绑定的音色不能在这里删除，需要先去该角色换一个音色。
-        </p>
+        <p className="text-xs text-neutral-500">{t("settings.voices.hint")}</p>
 
         {!status?.configured && (
-          <p className="text-sm text-neutral-500">请先配置 API Key。</p>
+          <p className="text-sm text-neutral-500">
+            {t("settings.voices.needApiKey")}
+          </p>
         )}
         {status?.configured && voicesLoading && voices.length === 0 && (
-          <p className="text-sm text-neutral-500">加载中…</p>
+          <p className="text-sm text-neutral-500">{t("common.loading")}</p>
         )}
         {status?.configured &&
           !voicesLoading &&
           voices.length === 0 &&
           !voicesError && (
-            <p className="text-sm text-neutral-500">还没有自定义音色。</p>
+            <p className="text-sm text-neutral-500">
+              {t("settings.voices.empty")}
+            </p>
           )}
         {voicesError && <p className="text-sm text-red-400">{voicesError}</p>}
 
@@ -416,17 +580,21 @@ export default function Settings() {
           {voices.map((v) => (
             <div
               key={v.voice_id}
-              className="flex items-center justify-between gap-3 rounded-lg border border-neutral-800 px-3 py-2"
+              className="flex items-center justify-between gap-3 rounded-lg border border-neutral-800 px-3 py-2 transition duration-200 hover:border-neutral-700 hover:bg-neutral-900/60"
             >
               <div className="min-w-0">
                 <p className="truncate font-mono text-xs text-neutral-300">
                   {v.voice_id}
                 </p>
                 <p className="mt-1 flex items-center gap-2 text-xs text-neutral-500">
-                  <span>{v.created_at ?? "创建时间未知"}</span>
+                  <span>
+                    {v.created_at ?? t("settings.voices.createdUnknown")}
+                  </span>
                   {v.bound_character_name && (
                     <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-emerald-400">
-                      绑定：{v.bound_character_name}
+                      {t("settings.voices.bound", {
+                        name: v.bound_character_name,
+                      })}
                     </span>
                   )}
                 </p>
@@ -436,22 +604,99 @@ export default function Settings() {
                 disabled={!!v.bound_character_id || deletingVoiceId === v.voice_id}
                 title={
                   v.bound_character_id
-                    ? `已绑定角色「${v.bound_character_name}」，无法删除`
+                    ? t("settings.voices.boundTitle", {
+                        name: v.bound_character_name ?? "",
+                      })
                     : undefined
                 }
-                className="shrink-0 rounded border border-neutral-800 px-2.5 py-1 text-xs text-red-400 disabled:opacity-30"
+                className={`${btn.dangerOutline} shrink-0 px-2.5 py-1 text-xs`}
               >
-                {deletingVoiceId === v.voice_id ? "删除中…" : "删除"}
+                {deletingVoiceId === v.voice_id
+                  ? t("common.deleting")
+                  : t("common.delete")}
               </button>
             </div>
           ))}
         </div>
       </section>
 
+      <section className="space-y-3">
+        <h2 className="text-sm font-medium text-neutral-400">
+          {t("settings.backup.heading")}
+        </h2>
+        <p className="text-xs text-neutral-500">{t("settings.backup.hint")}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setConfirmingExport(true)}
+            disabled={backupBusy !== null}
+            className={`${btn.outline} px-3 py-2 text-sm`}
+          >
+            {backupBusy === "export"
+              ? t("settings.backup.exporting")
+              : t("settings.backup.export")}
+          </button>
+          <button
+            onClick={() => setConfirmingRestore(true)}
+            disabled={backupBusy !== null}
+            className={`${btn.outline} px-3 py-2 text-sm`}
+          >
+            {backupBusy === "import"
+              ? t("settings.backup.importing")
+              : t("settings.backup.import")}
+          </button>
+        </div>
+        {backupResult && (
+          <p className="text-sm break-all text-emerald-400">{backupResult}</p>
+        )}
+        {backupError && <p className="text-sm text-red-400">{backupError}</p>}
+      </section>
+
+      {confirmingExport && (
+        <ConfirmDialog
+          title={t("settings.backup.exportTitle")}
+          body={t("settings.backup.exportBody")}
+          confirmLabel={t("settings.backup.exportConfirm")}
+          tone="primary"
+          busy={backupBusy === "export"}
+          onConfirm={handleExportBackup}
+          onCancel={() => setConfirmingExport(false)}
+        >
+          {status?.configured && (
+            <label className="flex items-start gap-2 text-sm text-neutral-300">
+              <input
+                type="checkbox"
+                checked={includeApiKey}
+                onChange={(e) => setIncludeApiKey(e.target.checked)}
+                disabled={backupBusy === "export"}
+                className="mt-0.5 accent-emerald-500"
+              />
+              <span>
+                {t("settings.backup.includeApiKey")}
+                <span className="block text-xs text-neutral-500">
+                  {t("settings.backup.includeApiKeyHint")}
+                </span>
+              </span>
+            </label>
+          )}
+        </ConfirmDialog>
+      )}
+
+      {confirmingRestore && (
+        <ConfirmDialog
+          title={t("settings.backup.restoreTitle")}
+          body={t("settings.backup.restoreBody")}
+          confirmLabel={t("settings.backup.restoreConfirm")}
+          tone="primary"
+          busy={backupBusy === "import"}
+          onConfirm={handleImportBackup}
+          onCancel={() => setConfirmingRestore(false)}
+        />
+      )}
+
       {pendingVoiceId && (
         <ConfirmDialog
-          title="删除音色？"
-          body={`${pendingVoiceId} 会从你的 DashScope 账号中永久删除，无法恢复；如果之后还想用，需要重新录制或重新设计。`}
+          title={t("settings.voices.deleteTitle")}
+          body={t("settings.voices.deleteBody", { id: pendingVoiceId })}
           busy={deletingVoiceId === pendingVoiceId}
           onConfirm={() => handleDeleteVoice(pendingVoiceId)}
           onCancel={() => setPendingVoiceId(null)}

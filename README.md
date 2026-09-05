@@ -11,6 +11,7 @@ Talk to it like a phone call: open the mic once and keep talking. The app detect
 - Barge-in: start speaking while the AI is talking and it stops immediately
 - Global hotkey toggles the mic from any window
 - Live transcript of both sides, with adjustable VAD sensitivity and silence threshold
+- History sidebar listing every past conversation with the current character — click one to read it back
 
 **Characters**
 - Define persona, speech habits, response language, and voice
@@ -26,6 +27,10 @@ Talk to it like a phone call: open the mic once and keep talking. The app detect
 - Design a voice from a text description, preview it, then commit
 - Manage custom voices stored under your DashScope account
 
+**Backup**
+- Export every character — persona, long-term memories and stored conversations — plus your settings to a single JSON file
+- Restore it on another device: characters it doesn't have are added, ones it does are updated, nothing is deleted
+
 ## Requirements
 
 - **Windows** — the API key is stored in the Windows Credential Manager
@@ -33,7 +38,7 @@ Talk to it like a phone call: open the mic once and keep talking. The app detect
 - [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024)
 - A Model Studio API key ([get one here](https://bailian.console.aliyun.com/))
 
-## Getting started
+## Getting Started
 
 ```bash
 npm install
@@ -48,22 +53,21 @@ npm run tauri build
 
 On first launch, open **Settings** and paste your API key, then use **Test connectivity** to confirm it works.
 
-### Region
+## Data Security
 
-Two regions are supported, since voice cloning/design and realtime audio are only available in these:
+| Data | Location | Protection |
+|---|---|---|
+| API key | Windows Credential Manager | Encrypted by the OS, tied to your Windows account |
+| Characters, long-term memories, conversation transcripts | `%APPDATA%\com.voicechat.app\voicechat.db` | **Not encrypted** — an ordinary SQLite file, readable by anything running as you |
+| Cloned and designed voices | Your DashScope account | Alibaba Cloud account credentials |
 
-| Region | Endpoint |
-|---|---|
-| `cn-beijing` (default) | `dashscope.aliyuncs.com` |
-| `ap-southeast-1` (Singapore) | `dashscope-intl.aliyuncs.com` |
+Audio is streamed to Alibaba Cloud to be answered and is not stored locally.
 
-Pick whichever is closer to reduce latency. If you use a dedicated workspace, enter its Workspace ID and requests will route to the workspace MaaS domain instead.
-
-## Models used
+## Models Used
 
 | Purpose | Model |
 |---|---|
 | Realtime speech conversation | `qwen-audio-3.0-realtime-flash` |
-| Memory summarization, persona expansion | `qwen3.8-flash` |
+| Memory summarization, conversation naming, persona expansion | `qwen3.8-flash` |
 | Voice design previews | `cosyvoice-v3.5-plus` |
 | Voice cloning | `voice-enrollment` |

@@ -19,7 +19,7 @@ pub struct RecorderHandle {
 
 pub fn start() -> Result<RecorderHandle, String> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("未找到麦克风设备")?;
+    let device = host.default_input_device().ok_or_else(|| crate::tr!("No microphone device found", "未找到麦克风设备"))?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let sample_format = supported.sample_format();
     let stream_config: cpal::StreamConfig = supported.into();
@@ -122,7 +122,7 @@ impl RecorderHandle {
             .map_err(|_| "recorder buffer lock poisoned".to_string())?
             .clone();
         if samples.is_empty() {
-            return Err("没有录到音频".to_string());
+            return Err(crate::tr!("No audio was recorded", "没有录到音频").to_string());
         }
 
         let spec = WavSpec {

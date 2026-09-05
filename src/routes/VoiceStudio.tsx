@@ -1,6 +1,8 @@
-import { useEffect, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import { useT, type MessageKey } from "../lib/i18n";
 import { ipc } from "../lib/ipc";
-import type { VoiceKind } from "../lib/types";
+import type { ManagedVoice, VoiceKind } from "../lib/types";
+import { btn, btnBase, cardBtn, hoverGlow, tabBtn } from "../lib/ui";
 
 export interface VoiceSelection {
   voice_kind: VoiceKind;
@@ -8,7 +10,7 @@ export interface VoiceSelection {
   voice_prompt: string | null;
 }
 
-type Tab = "preset" | "clone" | "design";
+type Tab = "preset" | "cloud" | "clone" | "design";
 
 export default function VoiceStudio({
   characterName,
@@ -19,16 +21,17 @@ export default function VoiceStudio({
   onSelect: (sel: VoiceSelection) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [tab, setTab] = useState<Tab>("preset");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
       <div className="flex max-h-full w-full max-w-xl flex-col rounded-2xl border border-neutral-800 bg-neutral-950 text-neutral-100">
         <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-3">
-          <h2 className="text-sm font-medium">音色工作室</h2>
+          <h2 className="text-sm font-medium">{t("voice.title")}</h2>
           <button
             onClick={onClose}
-            className="text-neutral-500 hover:text-neutral-300"
+            className={`${btn.quiet} size-7 text-sm hover:rotate-90`}
           >
             ✕
           </button>
@@ -37,27 +40,25 @@ export default function VoiceStudio({
         <nav className="flex gap-1 border-b border-neutral-800 px-5 pt-2">
           {(
             [
-              ["preset", "预置"],
-              ["clone", "录音复刻"],
-              ["design", "文本设计"],
-            ] as const
+              ["preset", "voice.tab.preset"],
+              ["cloud", "voice.tab.cloud"],
+              ["clone", "voice.tab.clone"],
+              ["design", "voice.tab.design"],
+            ] as const satisfies readonly (readonly [Tab, MessageKey])[]
           ).map(([key, label]) => (
             <button
               key={key}
               onClick={() => setTab(key)}
-              className={`rounded-t-lg px-3 py-1.5 text-sm ${
-                tab === key
-                  ? "bg-neutral-900 text-neutral-100"
-                  : "text-neutral-500 hover:text-neutral-300"
-              }`}
+              className={tabBtn(tab === key)}
             >
-              {label}
+              {t(label)}
             </button>
           ))}
         </nav>
 
         <div className="flex-1 overflow-y-auto p-5">
           {tab === "preset" && <PresetTab onSelect={onSelect} />}
+          {tab === "cloud" && <CloudTab onSelect={onSelect} />}
           {tab === "clone" && (
             <CloneTab characterName={characterName} onSelect={onSelect} />
           )}
@@ -70,12 +71,30 @@ export default function VoiceStudio({
   );
 }
 
-const PRESET_VOICE_INFO: Record<string, { name: string; desc: string; lang: string }> = {
-  longanqian: { name: "龙安千", desc: "默认音色", lang: "语言未公开说明，推测与同系列一致（中/英）" },
-  longanlingxin: { name: "龙安灵心", desc: "女声・知心温暖音", lang: "中文（普通话）、英文" },
-  longanlingxi: { name: "龙安灵希", desc: "女声・可爱甜美音", lang: "中文（普通话）、英文" },
-  longanxiaoxin: { name: "龙安小昕", desc: "女声・亲切活泼音", lang: "中文（普通话）、英文" },
-  longanlufeng: { name: "龙安鲁风", desc: "男声・明亮开朗音", lang: "中文（普通话）、英文" },
+const PRESET_VOICE_INFO: Record<
+  string,
+  { name: MessageKey; desc: MessageKey }
+> = {
+  longanqian: {
+    name: "voice.preset.longanqian.name",
+    desc: "voice.preset.longanqian.desc",
+  },
+  longanlingxin: {
+    name: "voice.preset.longanlingxin.name",
+    desc: "voice.preset.longanlingxin.desc",
+  },
+  longanlingxi: {
+    name: "voice.preset.longanlingxi.name",
+    desc: "voice.preset.longanlingxi.desc",
+  },
+  longanxiaoxin: {
+    name: "voice.preset.longanxiaoxin.name",
+    desc: "voice.preset.longanxiaoxin.desc",
+  },
+  longanlufeng: {
+    name: "voice.preset.longanlufeng.name",
+    desc: "voice.preset.longanlufeng.desc",
+  },
 };
 
 function PresetTab({
@@ -83,6 +102,7 @@ function PresetTab({
 }: {
   onSelect: (sel: VoiceSelection) => void;
 }) {
+  const t = useT();
   const [voices, setVoices] = useState<string[]>([]);
 
   useEffect(() => {
@@ -91,31 +111,144 @@ function PresetTab({
 
   return (
     <div className="space-y-2">
-      <p className="text-sm text-neutral-500">
-        预置音色暂无线上试听样本，按名称选择。
-      </p>
+      <p className="text-sm text-neutral-500">{t("voice.preset.hint")}</p>
       {voices.map((v) => {
         const info = PRESET_VOICE_INFO[v];
         return (
           <button
             key={v}
             onClick={() => onSelect({ voice_kind: "preset", voice_id: v, voice_prompt: null })}
-            className="block w-full rounded-lg border border-neutral-800 px-4 py-2.5 text-left text-sm hover:border-neutral-600"
+            className={`${cardBtn} px-4 py-2.5 text-sm`}
           >
             <div className="flex items-baseline justify-between gap-3">
-              <span className="font-medium">{info?.name ?? v}</span>
+              <span className="font-medium">
+                {info ? t(info.name) : v}
+              </span>
               <span className="text-xs text-neutral-600">{v}</span>
             </div>
             {info && (
-              <p className="mt-0.5 text-xs text-neutral-500">
-                {info.desc}
-                <span className="text-neutral-600"> ・ {info.lang}</span>
-              </p>
+              <p className="mt-0.5 text-xs text-neutral-500">{t(info.desc)}</p>
             )}
           </button>
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Voices that already exist on the account, listed straight from
+ * DashScope's `list_voice`. Reusing one costs nothing and takes effect
+ * immediately, which is the point of the tab: the clone and design tabs
+ * both enrol a *new* voice every time they run, so without this a user who
+ * has already made the voice they want has no way back to it.
+ *
+ * There is no audition here for the same reason the preset tab has none —
+ * the realtime series exposes no standalone synthesis endpoint to preview
+ * with, only the live session itself.
+ */
+function CloudTab({ onSelect }: { onSelect: (sel: VoiceSelection) => void }) {
+  const t = useT();
+  const [voices, setVoices] = useState<ManagedVoice[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setVoices(await ipc.listVoices());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="text-sm text-neutral-500">{t("voice.cloud.hint")}</p>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className={`${btn.quiet} shrink-0 px-2 py-1 text-xs`}
+        >
+          {loading ? t("voice.cloud.refreshing") : t("voice.cloud.refresh")}
+        </button>
+      </div>
+
+      {error && <p className="text-sm text-red-400">{error}</p>}
+      {voices === null && loading && (
+        <p className="text-sm text-neutral-500">{t("common.loading")}</p>
+      )}
+      {voices !== null && voices.length === 0 && !error && (
+        <p className="text-sm text-neutral-500">{t("voice.cloud.empty")}</p>
+      )}
+
+      {voices?.map((v) => (
+        <CloudVoiceRow key={v.voice_id} voice={v} onSelect={onSelect} />
+      ))}
+    </div>
+  );
+}
+
+function CloudVoiceRow({
+  voice,
+  onSelect,
+}: {
+  voice: ManagedVoice;
+  onSelect: (sel: VoiceSelection) => void;
+}) {
+  const t = useT();
+  // A missing status is treated as usable rather than blocked: it means the
+  // API left the field out, not that the voice failed review.
+  const blocked: MessageKey | null = !voice.realtime_compatible
+    ? "voice.cloud.incompatible"
+    : voice.status === "DEPLOYING"
+      ? "voice.cloud.deploying"
+      : voice.status === "UNDEPLOYED"
+        ? "voice.cloud.undeployed"
+        : null;
+
+  return (
+    <button
+      onClick={() =>
+        onSelect({
+          // `list_voice` doesn't say which flow enrolled a voice, and the id
+          // doesn't encode it either, so everything picked here is recorded
+          // as cloned — true of every enrolled voice, including the ones the
+          // design tab produced, whose prompt is no longer recoverable.
+          voice_kind: "cloned",
+          voice_id: voice.voice_id,
+          voice_prompt: null,
+        })
+      }
+      disabled={blocked !== null}
+      title={blocked ? t("voice.cloud.unusableTitle") : undefined}
+      className={`${cardBtn} px-4 py-2.5 text-sm`}
+    >
+      <p className="truncate font-mono text-xs text-neutral-300">
+        {voice.voice_id}
+      </p>
+      <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+        {voice.created_at && <span>{voice.created_at}</span>}
+        {voice.bound_character_name && (
+          <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-emerald-400">
+            {t("voice.cloud.bound", { name: voice.bound_character_name })}
+          </span>
+        )}
+        {blocked && (
+          <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-neutral-400">
+            {t(blocked)}
+          </span>
+        )}
+      </p>
+    </button>
   );
 }
 
@@ -126,6 +259,7 @@ function CloneTab({
   characterName: string;
   onSelect: (sel: VoiceSelection) => void;
 }) {
+  const t = useT();
   const [recording, setRecording] = useState(false);
   const [dataUri, setDataUri] = useState<string | null>(null);
   const [fileUri, setFileUri] = useState<string | null>(null);
@@ -177,25 +311,23 @@ function CloneTab({
     setFileUri(null);
     const reader = new FileReader();
     reader.onload = () => setFileUri(reader.result as string);
-    reader.onerror = () => setError("读取文件失败");
+    reader.onerror = () => setError(t("voice.clone.readFailed"));
     reader.readAsDataURL(file);
   }
 
   return (
     <div className="space-y-5">
       <div className="space-y-2">
-        <p className="text-sm text-neutral-400">
-          应用内录制 10–20 秒清晰语音（上限 60 秒）。
-        </p>
+        <p className="text-sm text-neutral-400">{t("voice.clone.recordHint")}</p>
         <button
           onClick={toggleRecording}
-          className={`w-full rounded-lg py-2.5 text-sm font-medium ${
+          className={`${btnBase} ${hoverGlow} w-full rounded-lg py-2.5 text-sm font-medium ${
             recording
-              ? "bg-red-500 text-neutral-950"
-              : "bg-neutral-800 text-neutral-100"
+              ? "bg-red-500 text-neutral-950 hover:bg-red-400 hover:shadow-red-500/25"
+              : "bg-neutral-800 text-neutral-100 hover:bg-neutral-700 hover:shadow-black/40"
           }`}
         >
-          {recording ? "■ 停止录音" : "● 开始录音"}
+          {t(recording ? "voice.clone.stop" : "voice.clone.start")}
         </button>
         {dataUri && (
           <div className="space-y-2">
@@ -204,20 +336,18 @@ function CloneTab({
             <button
               onClick={() => cloneFrom(dataUri)}
               disabled={busy}
-              className="w-full rounded-lg bg-neutral-100 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50"
+              className={`${btn.primary} w-full py-2 text-sm font-medium`}
             >
-              {busy ? "复刻中…" : "使用此录音克隆"}
+              {busy ? t("voice.clone.cloning") : t("voice.clone.useRecording")}
             </button>
           </div>
         )}
       </div>
 
       <div className="space-y-2 border-t border-neutral-800 pt-4">
-        <p className="text-sm text-neutral-400">
-          或选择一段本地音频文件（10–20 秒清晰语音）。
-        </p>
-        <label className="block w-full cursor-pointer rounded-lg border border-neutral-700 px-3 py-2 text-center text-sm text-neutral-200 hover:border-neutral-500">
-          {fileName ?? "选择文件…"}
+        <p className="text-sm text-neutral-400">{t("voice.clone.fileHint")}</p>
+        <label className={`${btn.outline} w-full px-3 py-2 text-sm`}>
+          {fileName ?? t("voice.clone.chooseFile")}
           <input
             type="file"
             accept="audio/*"
@@ -232,9 +362,9 @@ function CloneTab({
             <button
               onClick={() => cloneFrom(fileUri)}
               disabled={busy}
-              className="w-full rounded-lg border border-neutral-700 py-2 text-sm text-neutral-200 disabled:opacity-40"
+              className={`${btn.outline} w-full py-2 text-sm`}
             >
-              {busy ? "复刻中…" : "使用此文件克隆"}
+              {busy ? t("voice.clone.cloning") : t("voice.clone.useFile")}
             </button>
           </div>
         )}
@@ -252,6 +382,7 @@ function DesignTab({
   characterName: string;
   onSelect: (sel: VoiceSelection) => void;
 }) {
+  const t = useT();
   const [prompt, setPrompt] = useState("");
   const [previewText, setPreviewText] = useState("");
   const [previewUri, setPreviewUri] = useState<string | null>(null);
@@ -292,13 +423,13 @@ function DesignTab({
     <div className="space-y-4">
       <div className="space-y-1.5">
         <label className="text-xs text-neutral-500">
-          音色描述（仅支持中/英文，≤500 字）
+          {t("voice.design.promptLabel")}
         </label>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value.slice(0, 500))}
           rows={3}
-          placeholder="例如：温柔知性的女声，语速偏慢，略带鼻音"
+          placeholder={t("voice.design.promptPlaceholder")}
           className="w-full resize-none rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
         />
         <p className="text-right text-xs text-neutral-600">{prompt.length}/500</p>
@@ -306,13 +437,13 @@ function DesignTab({
 
       <div className="space-y-1.5">
         <label className="text-xs text-neutral-500">
-          试听文本（建议 150 字以上，够念满 15 秒）
+          {t("voice.design.previewTextLabel")}
         </label>
         <textarea
           value={previewText}
           onChange={(e) => setPreviewText(e.target.value)}
           rows={4}
-          placeholder="用来生成试听样本的一段文字…"
+          placeholder={t("voice.design.previewTextPlaceholder")}
           className="w-full resize-none rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
         />
       </div>
@@ -320,9 +451,9 @@ function DesignTab({
       <button
         onClick={generatePreview}
         disabled={busy || !prompt.trim() || !previewText.trim()}
-        className="w-full rounded-lg bg-neutral-800 py-2.5 text-sm font-medium text-neutral-100 disabled:opacity-50"
+        className={`${btn.solid} w-full py-2.5 text-sm font-medium`}
       >
-        {busy ? "生成中…" : "生成试听"}
+        {busy ? t("voice.design.generating") : t("voice.design.generate")}
       </button>
 
       {previewUri && (
@@ -332,9 +463,9 @@ function DesignTab({
           <button
             onClick={confirm}
             disabled={busy}
-            className="w-full rounded-lg bg-neutral-100 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50"
+            className={`${btn.primary} w-full py-2 text-sm font-medium`}
           >
-            {busy ? "复刻中…" : "满意，使用此音色"}
+            {busy ? t("voice.clone.cloning") : t("voice.design.accept")}
           </button>
         </div>
       )}

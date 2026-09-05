@@ -43,10 +43,32 @@ struct PreviewAudio {
 #[derive(Deserialize, Clone)]
 pub struct VoiceListEntry {
     pub voice_id: String,
+    /// `OK` (usable), `DEPLOYING` (still being reviewed) or `UNDEPLOYED`
+    /// (rejected). Only `OK` voices can actually be synthesized with.
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
     pub gmt_create: Option<String>,
+    /// Only the Qwen series reports this back from `list_voice`.
+    #[serde(default)]
+    pub target_model: Option<String>,
+}
+
+impl VoiceListEntry {
+    /// Whether this voice can drive the live session. An account accumulates
+    /// TTS-series voices too — the Voice Design flow enrolls one on
+    /// `DESIGN_TARGET_MODEL` before cloning its preview for realtime use —
+    /// and handing one of those to the realtime model fails at connect time,
+    /// so they are told apart here instead of at the point of failure.
+    ///
+    /// When the API doesn't report `target_model` the id still carries it:
+    /// `create_voice` builds ids as `{target_model}-{prefix}-{hash}`.
+    pub fn is_realtime(&self) -> bool {
+        match self.target_model.as_deref().filter(|m| !m.is_empty()) {
+            Some(model) => model == REALTIME_TARGET_MODEL,
+            None => self.voice_id.starts_with(REALTIME_TARGET_MODEL),
+        }
+    }
 }
 
 pub struct DesignedVoicePreview {
@@ -88,10 +110,15 @@ impl VoiceService {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {text}"));
+            return Err(format!("HTTP {status}: {}", crate::dashscope::snippet(&text)));
         }
         let parsed: EnrollmentResponse =
-            serde_json::from_str(&text).map_err(|e| format!("解析响应失败: {e}; 原始: {text}"))?;
+            serde_json::from_str(&text).map_err(|e| {
+                crate::tr!(
+                    format!("Could not parse the response: {e}; raw: {}", crate::dashscope::snippet(&text)),
+                    format!("解析响应失败: {e}; 原始: {}", crate::dashscope::snippet(&text)),
+                )
+            })?;
         Ok(parsed.output)
     }
 
@@ -117,7 +144,7 @@ impl VoiceService {
                 }
             }))
             .await?;
-        output.voice_id.ok_or_else(|| "响应中缺少 voice_id".to_string())
+        output.voice_id.ok_or_else(|| crate::tr!("The response had no voice_id", "响应中缺少 voice_id").to_string())
     }
 
     /// Step 1 of the text-design bridge: describe a voice in words and get a
@@ -149,16 +176,24 @@ impl VoiceService {
             .preview_audio
             .and_then(|p| p.data)
             .filter(|d| !d.is_empty())
-            .ok_or_else(|| "响应中缺少试听音频".to_string())?;
+            .ok_or_else(|| {
+                crate::tr!(
+                    "The response had no preview audio",
+                    "响应中缺少试听音频",
+                )
+                .to_string()
+            })?;
         Ok(DesignedVoicePreview {
             tts_voice: output.voice,
             preview_audio_b64,
         })
     }
 
-    /// Lists custom voices (cloned or designed) created under this account.
-    /// Doesn't include the built-in preset voices — those aren't
-    /// account-scoped resources, just fixed names the realtime API accepts.
+    /// Lists custom voices (cloned or designed) created under this account,
+    /// across every target model — see `VoiceListEntry::is_realtime` for
+    /// which of them the live session can actually use. Doesn't include the
+    /// built-in preset voices — those aren't account-scoped resources, just
+    /// fixed names the realtime API accepts.
     pub async fn list_voices(&self) -> Result<Vec<VoiceListEntry>, String> {
         let output = self
             .call(json!({

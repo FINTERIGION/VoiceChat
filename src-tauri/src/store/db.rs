@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_drop_unused_character_columns.sql"),
+    include_str!("migrations/0003_conversation_titles.sql"),
 ];
 
 pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {

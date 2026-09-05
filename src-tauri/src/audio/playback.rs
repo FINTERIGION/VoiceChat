@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -22,6 +22,19 @@ const PRIMING_MS: u64 = 250;
 // space while backpressured (see `PlaybackMsg::Append` handling) — not
 // latency-critical since this thread isn't the realtime audio callback.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+// Ceiling on audio waiting to be played, as bytes of 24 kHz mono PCM16.
+//
+// The queue drains at the speed sound comes out of the speakers, so however
+// far ahead the server runs, the backlog is bounded by how much it sends.
+// Normally that self-corrects: a reply arrives in a burst, plays out, done.
+// A server that keeps sending faster than realtime without end would grow
+// this without end too, and the sender can't block to push back — it is the
+// session actor, which also has to stay responsive to barge-in.
+//
+// So the queue is capped instead, at roughly a minute of speech: far past
+// any real reply (they run seconds), and small enough that the pathological
+// case costs a few megabytes rather than everything.
+const MAX_QUEUED_BYTES: usize = (SOURCE_HZ as usize) * 2 * 60;
 
 enum PlaybackMsg {
     /// PCM16LE mono bytes at 24 kHz, decoded from a `response.audio.delta`
@@ -40,6 +53,11 @@ enum PlaybackMsg {
 
 pub struct PlaybackHandle {
     tx: std_mpsc::Sender<PlaybackMsg>,
+    /// Bytes sitting in `tx` that the playback thread hasn't taken yet.
+    /// Tracked rather than bounding the channel by message count, because
+    /// `audio.delta` chunks vary in size — it is the memory that needs a
+    /// ceiling, not the number of messages holding it.
+    queued_bytes: Arc<AtomicUsize>,
     /// Bumped synchronously by `clear()`. A plain "should clear" bool can't
     /// be shared between two independent readers (the realtime callback and
     /// the message thread's `Append` wait loop below): whichever reads it
@@ -50,9 +68,34 @@ pub struct PlaybackHandle {
 }
 
 impl PlaybackHandle {
+    /// Queues decoded audio for playback, dropping it if the backlog is
+    /// already at `MAX_QUEUED_BYTES`.
+    ///
+    /// Dropping is the only option that keeps this non-blocking: the caller
+    /// is the session actor's event loop, and stalling it here would also
+    /// stall the barge-in and mic commands it is meant to be handling. A
+    /// drop is audible — the reply skips — but reaching this point already
+    /// means the server has sent a minute of speech faster than a minute,
+    /// which is not something a working conversation does.
     pub fn append(&self, pcm24k_bytes: Vec<u8>) {
+        let len = pcm24k_bytes.len();
+        let queued = self.queued_bytes.load(Ordering::Acquire);
+        if queued.saturating_add(len) > MAX_QUEUED_BYTES {
+            tracing::warn!(
+                queued,
+                dropped = len,
+                "playback backlog at its ceiling; dropping this chunk"
+            );
+            return;
+        }
+        self.queued_bytes.fetch_add(len, Ordering::Release);
         let current_gen = self.clear_gen.load(Ordering::Acquire);
-        let _ = self.tx.send(PlaybackMsg::Append(pcm24k_bytes, current_gen));
+        if self.tx.send(PlaybackMsg::Append(pcm24k_bytes, current_gen)).is_err() {
+            // The playback thread is gone, so nothing will ever subtract
+            // this back off; undo it here or the counter ratchets up and
+            // starts rejecting against a queue that no longer exists.
+            self.queued_bytes.fetch_sub(len, Ordering::Release);
+        }
     }
 
     /// Synchronous: the generation counter is bumped before this returns, so
@@ -78,7 +121,7 @@ impl Drop for PlaybackHandle {
 
 pub fn start() -> Result<PlaybackHandle, String> {
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or("未找到扬声器设备")?;
+    let device = host.default_output_device().ok_or_else(|| crate::tr!("No speaker device found", "未找到扬声器设备"))?;
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let sample_format = supported.sample_format();
     let stream_config: cpal::StreamConfig = supported.into();
@@ -89,6 +132,8 @@ pub fn start() -> Result<PlaybackHandle, String> {
     let clear_gen = Arc::new(AtomicU64::new(0));
     let clear_gen_cb = clear_gen.clone();
     let clear_gen_handle = clear_gen.clone();
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let queued_bytes_thread = queued_bytes.clone();
 
     let thread = thread::Builder::new()
         .name("voicechat-playback".into())
@@ -180,6 +225,12 @@ pub fn start() -> Result<PlaybackHandle, String> {
             while let Ok(msg) = rx.recv() {
                 match msg {
                     PlaybackMsg::Append(bytes, msg_gen) => {
+                        // Off the backlog the moment it is in hand, ahead of
+                        // the staleness check below: a skipped chunk is just
+                        // as much no longer queued as a played one, and
+                        // missing this on the `continue` path would leak the
+                        // count until the ceiling rejected everything.
+                        queued_bytes_thread.fetch_sub(bytes.len(), Ordering::Release);
                         // Stale even before we start: this chunk was decoded
                         // and enqueued before a `clear()` that's already
                         // happened (common when a burst has queued several
@@ -230,6 +281,7 @@ pub fn start() -> Result<PlaybackHandle, String> {
 
     Ok(PlaybackHandle {
         tx,
+        queued_bytes,
         clear_gen: clear_gen_handle,
         thread: Some(thread),
     })

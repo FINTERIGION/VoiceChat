@@ -1,10 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  BackupExport,
+  BackupImportSummary,
   Character,
   CharacterInput,
+  ChatMessage,
   ChatStateEvent,
   ConnectionSettings,
+  ConversationSummary,
   DesignPreviewResult,
   ManagedVoice,
   Memory,
@@ -24,6 +28,9 @@ export const ipc = {
   setConnectionSettings: (settings: ConnectionSettings) =>
     invoke<void>("set_connection_settings", { settings }),
   listRegions: () => invoke<RegionOption[]>("list_regions"),
+  getUiLanguage: () => invoke<string>("get_ui_language"),
+  setUiLanguage: (language: string) =>
+    invoke<void>("set_ui_language", { language }),
   getVadSettings: () => invoke<VadSettings>("get_vad_settings"),
   setVadSettings: (settings: VadSettings) =>
     invoke<void>("set_vad_settings", { settings }),
@@ -43,8 +50,19 @@ export const ipc = {
   updateMemory: (id: string, content: string) =>
     invoke<Memory>("update_memory", { id, content }),
   deleteMemory: (id: string) => invoke<void>("delete_memory", { id }),
-  clearMemories: (characterId: string) =>
-    invoke<void>("clear_memories", { characterId }),
+  deleteMemories: (ids: string[]) => invoke<void>("delete_memories", { ids }),
+
+  listConversations: (characterId: string) =>
+    invoke<ConversationSummary[]>("list_conversations", { characterId }),
+  getConversationMessages: (id: string) =>
+    invoke<ChatMessage[]>("get_conversation_messages", { id }),
+  getActiveConversationId: () =>
+    invoke<string | null>("get_active_conversation_id"),
+  newConversation: () => invoke<void>("new_conversation"),
+  renameConversation: (id: string, title: string) =>
+    invoke<ConversationSummary>("rename_conversation", { id, title }),
+  deleteConversation: (id: string) =>
+    invoke<void>("delete_conversation", { id }),
 
   listCharacters: () => invoke<Character[]>("list_characters"),
   createCharacter: (input: CharacterInput) =>
@@ -73,6 +91,18 @@ export const ipc = {
 
   listVoices: () => invoke<ManagedVoice[]>("list_voices"),
   deleteVoice: (voiceId: string) => invoke<void>("delete_voice", { voiceId }),
+
+  /**
+   * Both open a native file dialog and resolve to `null` when the user
+   * closes it without choosing — an ordinary outcome, not a failure.
+   *
+   * `includeApiKey` puts the key in the file, which is what makes the
+   * restore on the other machine seamless and what makes the file worth
+   * guarding — so the caller confirms it with the user first.
+   */
+  exportBackup: (includeApiKey: boolean) =>
+    invoke<BackupExport | null>("export_backup", { includeApiKey }),
+  importBackup: () => invoke<BackupImportSummary | null>("import_backup"),
 };
 
 export function onChatState(
@@ -107,6 +137,20 @@ export function onChatMic(
   handler: (open: boolean) => void,
 ): Promise<UnlistenFn> {
   return listen<boolean>("chat:mic", (e) => handler(e.payload));
+}
+
+/**
+ * Fired whenever the history list may have changed — a conversation opened,
+ * a message stored, a name generated, a session ended. The payload is the
+ * conversation the live session is writing to right now, or `null` when it
+ * isn't recording one; the list itself is refetched, since the reasons it
+ * can change (a rename from another window, a deletion) are more than one
+ * event could usefully describe.
+ */
+export function onChatConversations(
+  handler: (activeId: string | null) => void,
+): Promise<UnlistenFn> {
+  return listen<string | null>("chat:conversations", (e) => handler(e.payload));
 }
 
 /**

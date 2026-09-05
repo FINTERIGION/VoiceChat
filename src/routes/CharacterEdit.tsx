@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
+import { useT, type MessageKey } from "../lib/i18n";
 import { ipc } from "../lib/ipc";
+import { btn } from "../lib/ui";
 import type { CharacterInput, Language } from "../lib/types";
 import VoiceStudio, { type VoiceSelection } from "./VoiceStudio";
 
-const LANGUAGE_LABEL: Record<Language, string> = {
-  zh: "中文",
-  ja: "日本語",
-  en: "English",
-  auto: "跟随用户",
+const LANGUAGE_LABEL: Record<Language, MessageKey> = {
+  zh: "language.zh",
+  ja: "language.ja",
+  en: "language.en",
+  auto: "language.auto",
 };
 
 function emptyInput(): CharacterInput {
@@ -32,6 +34,7 @@ export default function CharacterEdit({
   id: string | "new";
   onDone: () => void;
 }) {
+  const t = useT();
   const [input, setInput] = useState<CharacterInput>(emptyInput());
   const [loading, setLoading] = useState(id !== "new");
   const [saving, setSaving] = useState(false);
@@ -70,7 +73,7 @@ export default function CharacterEdit({
 
   async function handleSave() {
     if (!input.name.trim()) {
-      setError("请填写角色名字");
+      setError(t("characterEdit.nameRequired"));
       return;
     }
     setSaving(true);
@@ -112,23 +115,25 @@ export default function CharacterEdit({
   }
 
   if (loading) {
-    return <p className="p-6 text-sm text-neutral-500">加载中…</p>;
+    return <p className="p-6 text-sm text-neutral-500">{t("common.loading")}</p>;
   }
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6 text-neutral-100">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">
-          {id === "new" ? "新建角色" : "编辑角色"}
+          {t(id === "new" ? "characterEdit.newTitle" : "characterEdit.editTitle")}
         </h1>
-        <button onClick={onDone} className="text-sm text-neutral-500 hover:text-neutral-300">
-          返回
+        <button onClick={onDone} className={`${btn.quiet} px-2 py-1 text-sm`}>
+          {t("common.back")}
         </button>
       </div>
 
       <section className="space-y-3">
         <div>
-          <label className="mb-1 block text-xs text-neutral-500">名字</label>
+          <label className="mb-1 block text-xs text-neutral-500">
+            {t("characterEdit.name")}
+          </label>
           <input
             value={input.name}
             onChange={(e) => set("name", e.target.value)}
@@ -137,7 +142,9 @@ export default function CharacterEdit({
         </div>
 
         <div>
-          <label className="mb-1 block text-xs text-neutral-500">语言</label>
+          <label className="mb-1 block text-xs text-neutral-500">
+            {t("characterEdit.language")}
+          </label>
           <select
             value={input.language}
             onChange={(e) => set("language", e.target.value as Language)}
@@ -145,7 +152,7 @@ export default function CharacterEdit({
           >
             {(Object.keys(LANGUAGE_LABEL) as Language[]).map((l) => (
               <option key={l} value={l}>
-                {LANGUAGE_LABEL[l]}
+                {t(LANGUAGE_LABEL[l])}
               </option>
             ))}
           </select>
@@ -153,27 +160,33 @@ export default function CharacterEdit({
       </section>
 
       <section className="space-y-2 rounded-xl border border-neutral-800 p-4">
-        <label className="block text-xs text-neutral-500">AI 润色人设</label>
+        <label className="block text-xs text-neutral-500">
+          {t("characterEdit.polish")}
+        </label>
         <div className="flex gap-2">
           <input
             value={polishDesc}
             onChange={(e) => setPolishDesc(e.target.value)}
-            placeholder="用一句话描述这个角色…"
+            placeholder={t("characterEdit.polishPlaceholder")}
             className="flex-1 rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
           />
           <button
             onClick={handlePolish}
             disabled={polishing || !polishDesc.trim()}
-            className="rounded border border-neutral-700 px-3 py-2 text-sm text-neutral-200 disabled:opacity-40"
+            className={`${btn.outline} px-3 py-2 text-sm`}
           >
-            {polishing ? "生成中…" : "生成"}
+            {polishing
+              ? t("characterEdit.generating")
+              : t("characterEdit.generate")}
           </button>
         </div>
       </section>
 
       <section className="space-y-3">
         <div>
-          <label className="mb-1 block text-xs text-neutral-500">人设</label>
+          <label className="mb-1 block text-xs text-neutral-500">
+            {t("characterEdit.persona")}
+          </label>
           <textarea
             value={input.persona}
             onChange={(e) => set("persona", e.target.value)}
@@ -182,7 +195,9 @@ export default function CharacterEdit({
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-neutral-500">语言习惯</label>
+          <label className="mb-1 block text-xs text-neutral-500">
+            {t("characterEdit.speechHabits")}
+          </label>
           <textarea
             value={input.speech_habits}
             onChange={(e) => set("speech_habits", e.target.value)}
@@ -193,16 +208,18 @@ export default function CharacterEdit({
       </section>
 
       <section className="space-y-2 rounded-xl border border-neutral-800 p-4">
-        <label className="block text-xs text-neutral-500">音色</label>
+        <label className="block text-xs text-neutral-500">
+          {t("characterEdit.voice")}
+        </label>
         <div className="flex items-center justify-between">
           <p className="text-sm">
-            {input.voice_kind} · {input.voice_id ?? "未设置"}
+            {input.voice_kind} · {input.voice_id ?? t("common.notSet")}
           </p>
           <button
             onClick={() => setVoiceStudioOpen(true)}
-            className="rounded border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200"
+            className={`${btn.outline} px-3 py-1.5 text-sm`}
           >
-            打开音色工作室
+            {t("characterEdit.openVoiceStudio")}
           </button>
         </div>
       </section>
@@ -214,12 +231,14 @@ export default function CharacterEdit({
             checked={input.memory_enabled}
             onChange={(e) => set("memory_enabled", e.target.checked)}
           />
-          启用长期记忆
+          {t("characterEdit.memoryEnabled")}
         </label>
 
         <div>
           <label className="mb-1 block text-xs text-neutral-500">
-            最大历史轮数 ({input.max_history_turns})
+            {t("characterEdit.maxHistoryTurns", {
+              count: input.max_history_turns,
+            })}
           </label>
           <input
             type="range"
@@ -239,9 +258,9 @@ export default function CharacterEdit({
         <button
           onClick={handleSave}
           disabled={saving}
-          className="flex-1 rounded-lg bg-neutral-100 py-2.5 text-sm font-medium text-neutral-900 disabled:opacity-50"
+          className={`${btn.primary} flex-1 py-2.5 text-sm font-medium`}
         >
-          {saving ? "保存中…" : "保存"}
+          {saving ? t("common.saving") : t("common.save")}
         </button>
       </div>
 

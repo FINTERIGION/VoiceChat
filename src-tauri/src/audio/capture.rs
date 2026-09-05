@@ -16,6 +16,17 @@ const TARGET_HZ: u32 = 16_000;
 const FRAME_MS: u32 = 20;
 const FRAME_SAMPLES: usize = (TARGET_HZ * FRAME_MS / 1000) as usize; // 320
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+// How many 20 ms frames may wait for the session actor before the oldest
+// audio stops being worth keeping. Two seconds is far more head room than
+// the actor needs between poll turns, and the ceiling matters because the
+// alternative is unbounded: frames arrive on the sound card's schedule
+// whether or not anything is consuming them, so an actor stalled on a slow
+// socket would otherwise accumulate them for as long as the stall lasts.
+//
+// Dropping beats buffering here. These frames go to a realtime API that is
+// tracking a live conversation; audio delivered seconds late is not a turn
+// it can use, it is a turn that arrives after the moment has passed.
+const FRAME_QUEUE_FRAMES: usize = 2_000 / FRAME_MS as usize;
 
 /// Owns the input device stream's lifetime and the capturing gate. The stream
 /// itself lives entirely inside the dedicated thread and never crosses a
@@ -45,12 +56,12 @@ impl Drop for CaptureControl {
     }
 }
 
-pub type FrameReceiver = tokio_mpsc::UnboundedReceiver<Vec<u8>>;
+pub type FrameReceiver = tokio_mpsc::Receiver<Vec<u8>>;
 pub type LevelReceiver = tokio_mpsc::UnboundedReceiver<f32>;
 
 pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or("未找到麦克风设备")?;
+    let device = host.default_input_device().ok_or_else(|| crate::tr!("No microphone device found", "未找到麦克风设备"))?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let sample_format = supported.sample_format();
     let stream_config: cpal::StreamConfig = supported.into();
@@ -58,7 +69,11 @@ pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String>
     let channels = stream_config.channels as usize;
 
     let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
-    let (frame_tx, frame_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+    let (frame_tx, frame_rx) = tokio_mpsc::channel::<Vec<u8>>(FRAME_QUEUE_FRAMES);
+    // Left unbounded, unlike the frames above: it carries one f32 at 20 Hz,
+    // so it is not a memory risk worth a ceiling, and a ceiling would cost
+    // correctness here — the 0.0 sent when the mic closes is a final value,
+    // not a sample, and dropping that one leaves the meter lit forever.
     let (level_tx, level_rx) = tokio_mpsc::unbounded_channel::<f32>();
     let capturing = Arc::new(AtomicBool::new(false));
     let capturing_cb = capturing.clone();
@@ -227,8 +242,20 @@ pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String>
                     while pcm16k_leftover.len() - frame_offset >= FRAME_SAMPLES {
                         let frame =
                             &pcm16k_leftover[frame_offset..frame_offset + FRAME_SAMPLES];
-                        if frame_tx.send(f32_to_pcm16le(frame)).is_err() {
-                            break;
+                        // `try_send` rather than blocking: this is the
+                        // capture thread, and holding it here would stop it
+                        // draining the device ring, turning a consumer stall
+                        // into dropped input at the hardware level instead.
+                        match frame_tx.try_send(f32_to_pcm16le(frame)) {
+                            Ok(()) => {}
+                            Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    "capture queue full; dropping a frame"
+                                );
+                            }
+                            // Receiver gone: nothing is listening any more,
+                            // so stop rather than spin.
+                            Err(tokio_mpsc::error::TrySendError::Closed(_)) => break,
                         }
                         frame_offset += FRAME_SAMPLES;
                     }

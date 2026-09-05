@@ -1,0 +1,226 @@
+import type { Messages } from "./messages";
+
+/**
+ * Simplified Chinese. Typed as `Messages`, so dropping or renaming a key in
+ * `en.ts` without updating this file fails the type check instead of
+ * silently falling back to English at runtime.
+ */
+export const zhCN: Messages = {
+  // ---- Navigation ----
+  "nav.chat": "对话",
+  "nav.characters": "角色",
+  "nav.settings": "设置",
+
+  // ---- Shared ----
+  "common.loading": "加载中…",
+  "common.save": "保存",
+  "common.saving": "保存中…",
+  "common.saved": "已保存",
+  "common.saveFailed": "保存失败",
+  "common.cancel": "取消",
+  "common.delete": "删除",
+  "common.deleting": "删除中…",
+  "common.working": "处理中…",
+  "common.edit": "编辑",
+  "common.back": "返回",
+  "common.notSet": "未设置",
+
+  // ---- Chat ----
+  "chat.state.idle": "空闲",
+  "chat.state.connecting": "连接中",
+  "chat.state.listening": "聆听中",
+  "chat.state.thinking": "思考中",
+  "chat.state.speaking": "说话中",
+  "chat.state.error": "出错了",
+  "chat.memory.on": "记忆：开",
+  "chat.memory.off": "本次不记录",
+  "chat.memory.onTitle": "本次对话会记入长期记忆",
+  "chat.memory.offTitle": "本次对话不会记入长期记忆",
+  "chat.empty":
+    "点击下方按钮开启麦克风，说完自动发送；AI 说话时直接开口就能打断…",
+  "chat.emptyWithHotkey":
+    "点击下方按钮或按 {hotkey} 开启麦克风，说完自动发送；AI 说话时直接开口就能打断…",
+  "chat.micOff": "点击开始对话",
+  "chat.micOn": "点击关闭麦克风",
+
+  // ---- Chat history sidebar ----
+  "history.title": "历史会话",
+  "history.new": "+ 新对话",
+  "history.newDisabledTitle": "当前就是一段新对话，还没有可保存的内容",
+  "history.empty": "开始对话后，记录会出现在这里。",
+  "history.live": "进行中",
+  "history.untitled": "未命名",
+  "history.messageCount": "{count} 条消息",
+  "history.backToLive": "回到当前对话",
+  "history.viewing": "正在查看历史对话",
+  "history.renameTitle": "重命名",
+  "history.renameLabel": "会话名称",
+  "history.deleteTitle": "删除这段对话？",
+  "history.deleteBody":
+    "对话记录会一并删除且无法恢复。角色从中记住的内容仍保留在长期记忆里。",
+  "history.loadFailed": "无法打开该对话",
+
+  // ---- Character list ----
+  "characters.title": "角色",
+  "characters.new": "+ 新建角色",
+  "characters.current": "当前",
+  "characters.noPersona": "（未填写人设）",
+  "characters.noVoice": "未设置音色",
+  "characters.switchHint": "双击切换",
+  "characters.switching": "切换中…",
+  "characters.memory": "记忆",
+  "characters.deleteTitle": "删除角色「{name}」？",
+  "characters.deleteBody": "该角色的全部对话记录和长期记忆会一并删除，无法恢复。",
+
+  // ---- Character editor ----
+  "characterEdit.newTitle": "新建角色",
+  "characterEdit.editTitle": "编辑角色",
+  "characterEdit.name": "名字",
+  "characterEdit.nameRequired": "请填写角色名字",
+  "characterEdit.language": "语言",
+  "characterEdit.polish": "AI 润色人设",
+  "characterEdit.polishPlaceholder": "用一句话描述这个角色…",
+  "characterEdit.generate": "生成",
+  "characterEdit.generating": "生成中…",
+  "characterEdit.persona": "人设",
+  "characterEdit.speechHabits": "语言习惯",
+  "characterEdit.voice": "音色",
+  "characterEdit.openVoiceStudio": "打开音色工作室",
+  "characterEdit.memoryEnabled": "启用长期记忆",
+  "characterEdit.maxHistoryTurns": "最大历史轮数（{count}）",
+
+  // The language a character speaks — unrelated to the display language.
+  "language.zh": "中文",
+  "language.ja": "日本語",
+  "language.en": "English",
+  "language.auto": "跟随用户",
+
+  // ---- Voice studio ----
+  "voice.title": "音色工作室",
+  "voice.tab.preset": "预置",
+  "voice.tab.cloud": "云端音色",
+  "voice.tab.clone": "录音复刻",
+  "voice.tab.design": "文本设计",
+  "voice.preset.hint": "预置音色暂无线上试听样本，按名称选择。",
+  "voice.preset.longanqian.name": "龙安千",
+  "voice.preset.longanqian.desc": "默认音色",
+  "voice.preset.longanlingxin.name": "龙安灵心",
+  "voice.preset.longanlingxin.desc": "女声・知心温暖音",
+  "voice.preset.longanlingxi.name": "龙安灵希",
+  "voice.preset.longanlingxi.desc": "女声・可爱甜美音",
+  "voice.preset.longanxiaoxin.name": "龙安小昕",
+  "voice.preset.longanxiaoxin.desc": "女声・亲切活泼音",
+  "voice.preset.longanlufeng.name": "龙安鲁风",
+  "voice.preset.longanlufeng.desc": "男声・明亮开朗音",
+  "voice.cloud.hint": "阿里云账户中已注册的音色，直接选用即可复用，不会新建音色。",
+  "voice.cloud.refresh": "刷新",
+  "voice.cloud.refreshing": "刷新中…",
+  "voice.cloud.empty": "该账户还没有自定义音色，请先复刻或设计一个。",
+  "voice.cloud.bound": "绑定：{name}",
+  "voice.cloud.incompatible": "仅支持语音合成，不能用于实时对话",
+  "voice.cloud.deploying": "审核中",
+  "voice.cloud.undeployed": "审核未通过，不可使用",
+  "voice.cloud.unusableTitle": "该音色无法用于实时对话",
+  "voice.clone.recordHint": "应用内录制 10–20 秒清晰语音（上限 60 秒）。",
+  "voice.clone.start": "● 开始录音",
+  "voice.clone.stop": "■ 停止录音",
+  "voice.clone.cloning": "复刻中…",
+  "voice.clone.useRecording": "使用此录音克隆",
+  "voice.clone.fileHint": "或选择一段本地音频文件（10–20 秒清晰语音）。",
+  "voice.clone.chooseFile": "选择文件…",
+  "voice.clone.useFile": "使用此文件克隆",
+  "voice.clone.readFailed": "读取文件失败",
+  "voice.design.promptLabel": "音色描述（仅支持中/英文，≤500 字）",
+  "voice.design.promptPlaceholder": "例如：温柔知性的女声，语速偏慢，略带鼻音",
+  "voice.design.previewTextLabel": "试听文本（建议 150 字以上，够念满 15 秒）",
+  "voice.design.previewTextPlaceholder": "用来生成试听样本的一段文字…",
+  "voice.design.generate": "生成试听",
+  "voice.design.generating": "生成中…",
+  "voice.design.accept": "满意，使用此音色",
+
+  // ---- Memory manager ----
+  "memory.title": "{name} 的记忆",
+  "memory.count": "共 {count} 条",
+  "memory.selected": "已选 {count} 条",
+  "memory.selectOne": "选中这条记忆",
+  "memory.selectAll": "全选",
+  "memory.deselectAll": "取消全选",
+  "memory.deleteSelected": "删除选中",
+  "memory.empty":
+    "还没有记忆。开启「启用长期记忆」并聊几轮之后，这里会出现摘要和事实条目。",
+  "memory.kind.summary": "摘要",
+  "memory.kind.fact": "事实",
+  "memory.kind.profile": "画像",
+  "memory.deleteTitle": "删除这条记忆？",
+  "memory.deleteSelectedTitle": "删除选中的 {count} 条记忆？",
+  "memory.deleteSelectedBody": "这些记忆会被永久删除，无法恢复。之后的对话会重新开始积累。",
+
+  // ---- Settings ----
+  "settings.title": "设置",
+  "settings.language.heading": "显示语言",
+  "settings.language.hint":
+    "只影响应用界面本身。角色说什么语言，在该角色里单独设置。",
+  "settings.apiKey.heading": "DashScope API Key",
+  "settings.apiKey.configured": "已配置（{tail}）",
+  "settings.apiKey.missing": "尚未配置",
+  "settings.apiKey.clear": "清除",
+  "settings.optional.heading": "可选配置",
+  "settings.optional.workspaceId": "WorkspaceId",
+  "settings.optional.workspacePlaceholder": "留空使用旧域名",
+  "settings.optional.region": "地域",
+  "settings.optional.regionDefault": "默认（{label}）",
+  "settings.optional.regionFallback": "北京",
+  "settings.optional.hint":
+    "语音克隆/设计和实时对话目前仅在这两个地域可用，选择离你更近的地域可以降低延迟。切换后需要重新测试连通性。",
+  "settings.saveConfig": "保存配置",
+  "settings.vad.heading": "免提检测",
+  "settings.vad.hint":
+    "控制麦克风开着的时候，多灵敏能听出你在说话、停顿多久算你说完了。",
+  "settings.vad.threshold": "VAD 阈值（{value}）",
+  "settings.vad.silence": "静音判定（{ms}ms）",
+  "settings.hotkey.heading": "全局快捷键",
+  "settings.hotkey.hint":
+    "在任意窗口按一下即可开关麦克风。点击下面的按钮，然后按下想要的按键组合。",
+  "settings.hotkey.capturing": "请按下新快捷键…",
+  "settings.hotkey.disable": "禁用",
+  "settings.connectivity.test": "测试连通性",
+  "settings.connectivity.testing": "测试中…",
+  "settings.connectivity.ok": "✓ 连接成功",
+  "settings.backup.heading": "备份与恢复",
+  "settings.backup.hint":
+    "把所有角色（人设、长期记忆、历史会话）连同设置和 API Key 导出到一个文件，带到另一台设备恢复后即可直接开口说话。自定义音色保存在你的 DashScope 账号里，恢复后角色仍然是原来的声音。",
+  "settings.backup.export": "备份到文件…",
+  "settings.backup.exporting": "备份中…",
+  "settings.backup.import": "从文件恢复…",
+  "settings.backup.importing": "恢复中…",
+  "settings.backup.exported":
+    "已备份 {characters} 个角色、{memories} 条记忆、{conversations} 个会话共 {messages} 条消息到 {path}",
+  "settings.backup.imported":
+    "已恢复 {characters} 个角色（其中 {added} 个是本机新增）、{memories} 条记忆、{conversations} 个会话共 {messages} 条消息。",
+  "settings.backup.importedWithSettings": "备份中的设置也已应用到本机。",
+  "settings.backup.importedWithKey": "备份中的设置和 API Key 也已应用到本机。",
+  "settings.backup.exportTitle": "备份到文件？",
+  "settings.backup.exportBody":
+    "文件中会包含所有角色（人设、长期记忆、历史会话），以及工作空间、地域、快捷键等设置。",
+  "settings.backup.exportConfirm": "选择保存位置…",
+  "settings.backup.includeApiKey": "包含我的 API Key",
+  "settings.backup.includeApiKeyHint":
+    "恢复时无需重新填写。请妥善保管该文件——打开它的人都能看到这个 Key 并消耗你的账户余额。如果要把角色分享给别人，请取消勾选。",
+  "settings.backup.restoreTitle": "从备份恢复？",
+  "settings.backup.restoreBody":
+    "本机没有的角色会被添加；已经存在的角色会被备份里的版本覆盖，连同其记忆和历史会话。本机已有的内容不会被删除；如果正在对话，会重新连接。\n\n备份中的设置会覆盖本机的设置：API Key、工作空间、地域、快捷键、灵敏度和界面语言。\n\n请只恢复你自己导出的文件。备份里既有决定 AI 行为的人设和记忆，也有计费所用的 API Key，来路不明的文件会改变你的角色说什么，也会改变你的声音被发往哪里。",
+  "settings.backup.restoreConfirm": "选择文件…",
+  "settings.voices.heading": "音色管理",
+  "settings.voices.refresh": "刷新",
+  "settings.voices.refreshing": "刷新中…",
+  "settings.voices.hint":
+    "通过「录音复刻」「文本设计」创建的自定义音色，保存在你的 DashScope 账号下。已被角色绑定的音色不能在这里删除，需要先去该角色换一个音色。",
+  "settings.voices.needApiKey": "请先配置 API Key。",
+  "settings.voices.empty": "还没有自定义音色。",
+  "settings.voices.createdUnknown": "创建时间未知",
+  "settings.voices.bound": "绑定：{name}",
+  "settings.voices.boundTitle": "已绑定角色「{name}」，无法删除",
+  "settings.voices.deleteTitle": "删除音色？",
+  "settings.voices.deleteBody":
+    "{id} 会从你的 DashScope 账号中永久删除，无法恢复；如果之后还想用，需要重新录制或重新设计。",
+};

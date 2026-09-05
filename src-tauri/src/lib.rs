@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod dashscope;
+mod i18n;
 mod llm;
 mod memory;
 mod prompt;
@@ -108,7 +109,7 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let app_dir = app.path().app_data_dir()?;
@@ -116,9 +117,24 @@ pub fn run() {
             let conn = store::db::open(&app_dir.join("voicechat.db"))?;
             seed_default_character(&conn)?;
             seed_english_coach_character(&conn)?;
+            // The session actor is spawned further down, so nothing is live
+            // yet and every conversation still open is one the last run never
+            // got to close.
+            match store::message::close_dangling_conversations(&conn) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("closed {n} conversation(s) left open by a previous run"),
+                Err(e) => tracing::error!("failed to close dangling conversations: {e}"),
+            }
             // `None` (key never set) means "use the default"; `Some("")`
             // means the user explicitly disabled the hotkey in Settings.
             let hotkey_setting = store::db::get_setting(&conn, "hotkey")?;
+
+            // Applied before anything can fail below, so even a startup
+            // error surfaces in the language the user picked.
+            i18n::set(match store::db::get_setting(&conn, "ui_language")? {
+                Some(tag) if !tag.is_empty() => i18n::Lang::from_tag(&tag),
+                _ => i18n::DEFAULT,
+            });
 
             let session = realtime::session::spawn(app.handle().clone());
             app.manage(AppState {
@@ -147,6 +163,8 @@ pub fn run() {
             app::commands::get_connection_settings,
             app::commands::set_connection_settings,
             app::commands::list_regions,
+            app::commands::get_ui_language,
+            app::commands::set_ui_language,
             app::commands::get_vad_settings,
             app::commands::set_vad_settings,
             app::commands::test_connectivity,
@@ -161,7 +179,13 @@ pub fn run() {
             app::commands::list_memories,
             app::commands::update_memory,
             app::commands::delete_memory,
-            app::commands::clear_memories,
+            app::commands::delete_memories,
+            app::commands::list_conversations,
+            app::commands::get_conversation_messages,
+            app::commands::get_active_conversation_id,
+            app::commands::new_conversation,
+            app::commands::rename_conversation,
+            app::commands::delete_conversation,
             app::commands::list_characters,
             app::commands::create_character,
             app::commands::update_character,
@@ -177,6 +201,8 @@ pub fn run() {
             app::commands::slugify,
             app::commands::list_voices,
             app::commands::delete_voice,
+            app::commands::export_backup,
+            app::commands::import_backup,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

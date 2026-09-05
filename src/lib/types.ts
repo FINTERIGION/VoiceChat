@@ -32,6 +32,31 @@ export interface TranscriptEvent {
   done: boolean;
 }
 
+/** One row of the Chat tab's history list. */
+export interface ConversationSummary {
+  id: string;
+  character_id: string;
+  /**
+   * `null` until the conversation has been named — either automatically,
+   * once there is a turn to name it after, or by hand. `preview` stands in
+   * for it meanwhile.
+   */
+  title: string | null;
+  started_at: string;
+  ended_at: string | null;
+  message_count: number;
+  /** The conversation's opening line, as a fallback label. */
+  preview: string;
+}
+
+/** A stored message, as replayed when reviewing a past conversation. */
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  created_at: string;
+}
+
 export type Language = "zh" | "ja" | "en" | "auto";
 export type VoiceKind = "preset" | "designed" | "cloned";
 
@@ -75,10 +100,17 @@ export interface DesignPreviewResult {
 
 export interface ManagedVoice {
   voice_id: string;
+  /** `OK`, `DEPLOYING` or `UNDEPLOYED`; only `OK` voices can be spoken with. */
   status: string | null;
   created_at: string | null;
   bound_character_id: string | null;
   bound_character_name: string | null;
+  /**
+   * Whether the live session can use this voice. An account also collects
+   * TTS-series voices — every run of the design flow enrols one before
+   * cloning its preview — and those can't drive a realtime conversation.
+   */
+  realtime_compatible: boolean;
 }
 
 export type MemoryKind = "profile" | "fact" | "summary";
@@ -90,4 +122,30 @@ export interface Memory {
   content: string;
   salience: number;
   updated_at: string;
+}
+
+/** How much a backup file holds, for the line Settings shows afterwards. */
+export interface BackupTotals {
+  characters: number;
+  memories: number;
+  conversations: number;
+  messages: number;
+}
+
+export interface BackupExport {
+  /** Where the file was written, as the user picked it. */
+  path: string;
+  totals: BackupTotals;
+}
+
+export interface BackupImportSummary {
+  totals: BackupTotals;
+  /** Of the characters in the file, how many this device didn't already have. */
+  new_characters: number;
+  /**
+   * Whether the file carried settings, and whether the API key was one of
+   * them and is now in this device's credential store.
+   */
+  settings_restored: boolean;
+  api_key_restored: boolean;
 }

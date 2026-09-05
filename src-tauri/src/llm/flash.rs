@@ -35,7 +35,7 @@ impl FlashClient {
             Ok(())
         } else {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::dashscope::snippet(&resp.text().await.unwrap_or_default());
             Err(format!("HTTP {status}: {body}"))
         }
     }
@@ -60,7 +60,7 @@ impl FlashClient {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {text}"));
+            return Err(format!("HTTP {status}: {}", crate::dashscope::snippet(&text)));
         }
 
         #[derive(Deserialize)]
@@ -77,12 +77,17 @@ impl FlashClient {
         }
 
         let parsed: ChatResponse =
-            serde_json::from_str(&text).map_err(|e| format!("解析响应失败: {e}; 原始: {text}"))?;
+            serde_json::from_str(&text).map_err(|e| {
+                crate::tr!(
+                    format!("Could not parse the response: {e}; raw: {}", crate::dashscope::snippet(&text)),
+                    format!("解析响应失败: {e}; 原始: {}", crate::dashscope::snippet(&text)),
+                )
+            })?;
         parsed
             .choices
             .into_iter()
             .next()
             .map(|c| c.message.content)
-            .ok_or_else(|| "响应中没有内容".to_string())
+            .ok_or_else(|| crate::tr!("The response contained no content", "响应中没有内容").to_string())
     }
 }
