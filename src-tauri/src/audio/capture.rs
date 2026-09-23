@@ -1,6 +1,6 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -8,8 +8,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::gate::{rms, LevelThrottle};
-use super::resample::{f32_to_pcm16le, Resampler};
+use super::gate::{LevelThrottle, rms};
+use super::resample::{Resampler, f32_to_pcm16le};
 use super::ring;
 
 const TARGET_HZ: u32 = 16_000;
@@ -61,7 +61,9 @@ pub type LevelReceiver = tokio_mpsc::UnboundedReceiver<f32>;
 
 pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or_else(|| crate::tr!("No microphone device found", "未找到麦克风设备"))?;
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| crate::tr!("No microphone device found", "未找到麦克风设备"))?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let sample_format = supported.sample_format();
     let stream_config: cpal::StreamConfig = supported.into();
@@ -240,8 +242,7 @@ pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String>
                 if capturing_cb.load(Ordering::Acquire) {
                     let mut frame_offset = 0;
                     while pcm16k_leftover.len() - frame_offset >= FRAME_SAMPLES {
-                        let frame =
-                            &pcm16k_leftover[frame_offset..frame_offset + FRAME_SAMPLES];
+                        let frame = &pcm16k_leftover[frame_offset..frame_offset + FRAME_SAMPLES];
                         // `try_send` rather than blocking: this is the
                         // capture thread, and holding it here would stop it
                         // draining the device ring, turning a consumer stall
@@ -249,9 +250,7 @@ pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String>
                         match frame_tx.try_send(f32_to_pcm16le(frame)) {
                             Ok(()) => {}
                             Err(tokio_mpsc::error::TrySendError::Full(_)) => {
-                                tracing::warn!(
-                                    "capture queue full; dropping a frame"
-                                );
+                                tracing::warn!("capture queue full; dropping a frame");
                             }
                             // Receiver gone: nothing is listening any more,
                             // so stop rather than spin.

@@ -5,16 +5,17 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::app::state::AppState;
 use crate::audio::{capture, playback};
 use crate::llm::flash::FlashClient;
 use crate::memory;
-use crate::prompt::builder::{build_instructions, CharacterPrompt};
+use crate::prompt::builder::{CharacterPrompt, build_instructions, format_recent_turns};
 use crate::secrets;
 use crate::store::{character, db, memory as memory_store, message as message_store};
+use crate::subtitle;
 
 use super::client::{self, WsSink, WsSource};
 use super::events::{ClientEvent, ServerEvent, SessionConfig, TurnDetection};
@@ -33,6 +34,14 @@ const ROLL_MAX_AUDIO_MS: u64 = 300_000;
 /// Settings page shows the same defaults this actually connects with.
 pub(crate) const DEFAULT_VAD_THRESHOLD: f32 = 0.5;
 pub(crate) const DEFAULT_VAD_SILENCE_MS: u32 = 800;
+/// Speech shorter than this while a reply is playing is a backchannel
+/// ("嗯"), not an interruption. The line keeps going. Longer than this,
+/// local playback is cut and the in-flight response is cancelled.
+const BARGE_CONFIRM: Duration = Duration::from_millis(300);
+/// After a backchannel, the server may still try to start a reply and
+/// answer with "another response is in progress". That is the overlap
+/// working as intended, not a failed call.
+const OVERLAP_ERROR_HOLD: Duration = Duration::from_millis(1500);
 
 #[derive(Debug)]
 pub enum SessionCommand {
@@ -47,8 +56,10 @@ pub enum SessionCommand {
     /// the first `session.update` of a connection, so switching character
     /// always means closing the old WS and opening a fresh one.
     SwitchCharacter(String),
-    /// Temporary per-conversation override for "本次对话不记录" — does not
-    /// touch the character's stored `memory_enabled`.
+    /// Temporary per-conversation override for "本次不计入记忆" — does not
+    /// touch the character's stored `memory_enabled`. Decides only whether
+    /// the conversation is summarized into long-term memory; it is saved to
+    /// the history either way.
     SetRecording(bool),
     /// Ends the conversation currently being written to (naming and
     /// summarizing it same as any other end) and opens a new one for the
@@ -65,7 +76,7 @@ pub struct SessionHandle {
     /// synchronously instead of needing a round trip through the actor.
     mic_open: Arc<AtomicBool>,
     /// Mirrors the actor's `conversation_id`: which history row the session
-    /// is writing to right now, or `None` when it isn't recording one. The
+    /// is writing to right now, or `None` between conversations. The
     /// Chat tab reads it to mark that row as live, and
     /// `delete_conversation` reads it to refuse deleting a conversation
     /// still being written to.
@@ -117,12 +128,7 @@ pub fn spawn(app: AppHandle) -> SessionHandle {
     let (tx, rx) = mpsc::unbounded_channel();
     let mic_open = Arc::new(AtomicBool::new(false));
     let active_conversation: ActiveConversation = Arc::new(Mutex::new(None));
-    tauri::async_runtime::spawn(run(
-        app,
-        rx,
-        mic_open.clone(),
-        active_conversation.clone(),
-    ));
+    tauri::async_runtime::spawn(run(app, rx, mic_open.clone(), active_conversation.clone()));
     SessionHandle {
         tx,
         mic_open,
@@ -148,14 +154,44 @@ struct TranscriptEvent {
     done: bool,
 }
 
+fn reserve_user_bubble(app: &AppHandle) {
+    let _ = app.emit(
+        "chat:transcript",
+        TranscriptEvent {
+            role: "user",
+            text: String::new(),
+            done: false,
+        },
+    );
+}
+
 fn emit_state(app: &AppHandle, state: ChatState) {
     let _ = app.emit("chat:state", state);
 }
 
+/// Lets the subtitle know the current line is over once whatever audio has
+/// arrived for it so far has played. Harmless to call more than once for the
+/// same line, or for one that ended long ago — the frontend only acts on the
+/// first, and only for the line it's showing.
+fn finish_subtitle_line(app: &AppHandle, playback: &Option<playback::PlaybackHandle>) {
+    if !subtitle::is_open(app) {
+        return;
+    }
+    let id = subtitle::current_line();
+    match playback {
+        Some(p) => {
+            let app = app.clone();
+            p.on_drained(move || subtitle::emit_spoken(&app, id));
+        }
+        None => subtitle::emit_spoken(app, id),
+    }
+}
+
 /// `None` means the current character has long-term memory switched off
 /// altogether, so there is no per-conversation choice to make and the Chat tab
-/// hides the toggle entirely. `Some` carries whether *this* conversation is
-/// being recorded, which the user can still flip either way.
+/// hides the toggle entirely. `Some` carries whether *this* conversation will
+/// be summarized into long-term memory, which the user can still flip either
+/// way. Neither affects the history, which keeps every conversation.
 fn emit_recording(app: &AppHandle, on: Option<bool>) {
     let _ = app.emit("chat:recording", on);
 }
@@ -181,6 +217,7 @@ async fn set_mic_open(
     is_talking: &mut bool,
     is_responding: &mut bool,
     dropping_stale: &mut bool,
+    dones_left: &mut u8,
     pending_commit: &mut bool,
     assistant_text: &mut String,
     capture_ctrl: &Option<capture::CaptureControl>,
@@ -199,6 +236,7 @@ async fn set_mic_open(
             let _ = client::send_event(sink, &ClientEvent::ResponseCancel {}).await;
             *is_responding = false;
             *dropping_stale = true;
+            *dones_left = 1;
             assistant_text.clear();
         }
         *is_talking = true;
@@ -413,7 +451,9 @@ async fn name_conversation(app: AppHandle, character_name: String, conversation_
 }
 
 /// Writes what was said into `memories` (rolling summary + facts), leaving
-/// the conversation row itself open.
+/// the conversation row itself open, and marks the row as memorized once the
+/// summary is stored. Callers decide whether the conversation counts toward
+/// memory at all; this only does the writing.
 ///
 /// Split out from `finalize_conversation` because a rolling reconnect needs
 /// the summary — it is what the next connection's instructions are built
@@ -425,7 +465,7 @@ async fn summarize_into_memory(
     character_name: &str,
     conversation_id: &str,
 ) {
-    let (messages, previous_summary, api_key, workspace_id, region) = {
+    let (messages, previous_summary, known_facts, previous_loops, api_key, workspace_id, region) = {
         let state = app.state::<AppState>();
         let conn = match state.db.lock() {
             Ok(c) => c,
@@ -438,13 +478,32 @@ async fn summarize_into_memory(
             tracing::error!("failed to list messages for summarization: {e}");
             Vec::new()
         });
-        let previous_summary = memory_store::list(&conn, character_id)
-            .ok()
-            .and_then(|mems| mems.into_iter().find(|m| m.kind == "summary"))
-            .map(|m| m.content);
+        let stored = memory_store::list(&conn, character_id).unwrap_or_default();
+        let previous_summary = stored
+            .iter()
+            .find(|m| m.kind == "summary")
+            .map(|m| m.content.clone());
+        let known_facts = stored
+            .iter()
+            .filter(|m| m.kind == "fact")
+            .cloned()
+            .collect::<Vec<_>>();
+        let previous_loops = stored
+            .iter()
+            .filter(|m| m.kind == "open_loop")
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>();
         let workspace_id = db::get_setting(&conn, "workspace_id").ok().flatten();
         let region = db::get_setting(&conn, "region").ok().flatten();
-        (messages, previous_summary, secrets::get_api_key(), workspace_id, region)
+        (
+            messages,
+            previous_summary,
+            known_facts,
+            previous_loops,
+            secrets::get_api_key(),
+            workspace_id,
+            region,
+        )
     };
 
     if messages.is_empty() {
@@ -455,34 +514,66 @@ async fn summarize_into_memory(
     };
 
     let client = FlashClient::new(api_key, workspace_id, region.as_deref());
-    match memory::summarize_conversation(&client, character_name, previous_summary.as_deref(), &messages).await {
+    let known_fact_texts = known_facts
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>();
+    match memory::summarize_conversation(
+        &client,
+        character_name,
+        previous_summary.as_deref(),
+        &known_fact_texts,
+        &previous_loops,
+        &messages,
+    )
+    .await
+    {
         Ok(result) => {
-            let state = app.state::<AppState>();
-            match state.db.lock() {
-                Ok(conn) => {
-                    if let Err(e) = memory::store_summary(&conn, character_id, &result) {
-                        tracing::error!("failed to store memory summary: {e}");
-                    }
-                }
-                Err(e) => tracing::error!("db lock failed while storing memory: {e}"),
+            let stored = {
+                let state = app.state::<AppState>();
+                state.db.lock().map_err(|e| e.to_string()).and_then(|conn| {
+                    memory::store_summary(&conn, character_id, &known_facts, &result)?;
+                    message_store::mark_memorized(&conn, conversation_id).map_err(|e| e.to_string())
+                })
             };
+            match stored {
+                // The row's `memorized` just changed, which the history
+                // list's delete dialog reads.
+                Ok(()) => emit_conversations(app),
+                Err(e) => tracing::error!("failed to store memory summary: {e}"),
+            }
         }
         Err(e) => tracing::warn!("memory summarization failed: {e}"),
     }
 }
 
-/// Ends the conversation row and, if it has any content, summarizes it into
-/// `memories`.
+/// Ends the conversation row and, if `memorize` and it has any content,
+/// summarizes it into `memories`.
 ///
 /// Called when the session is genuinely done writing to this row — not on a
 /// dropped-socket or rolling reconnect, which carries on with the same
 /// conversation (see `CarriedConversation`). It still runs on unclean ends
 /// like an idle timeout, so those keep whatever was actually said.
-async fn finalize_conversation(app: &AppHandle, character_id: &str, character_name: &str, conversation_id: &str) {
+///
+/// `memorize` is the conversation's own choice as it ends — the character's
+/// memory switch, narrowed by "本次不计入记忆". A conversation that doesn't
+/// count is still named and closed like any other: it stays in the history.
+async fn finalize_conversation(
+    app: &AppHandle,
+    character_id: &str,
+    character_name: &str,
+    conversation_id: &str,
+    memorize: bool,
+) {
     // Catches conversations that ended before the mid-session naming pass
     // could run (a single turn, or one where it failed); returns immediately
     // for the rest.
-    name_conversation(app.clone(), character_name.to_string(), conversation_id.to_string()).await;
+    name_conversation(
+        app.clone(),
+        character_name.to_string(),
+        conversation_id.to_string(),
+    )
+    .await;
 
     {
         let state = app.state::<AppState>();
@@ -496,7 +587,9 @@ async fn finalize_conversation(app: &AppHandle, character_id: &str, character_na
         }
     }
 
-    summarize_into_memory(app, character_id, character_name, conversation_id).await;
+    if memorize {
+        summarize_into_memory(app, character_id, character_name, conversation_id).await;
+    }
 }
 
 /// A conversation row held open across a reconnect the user never asked
@@ -506,18 +599,16 @@ struct CarriedConversation {
     id: String,
     character_id: String,
     character_name: String,
-    /// The `SetRecording` choice this conversation was left with. "本次对话
-    /// 不记录" is a decision about the conversation, so it has to outlive the
+    /// The `SetRecording` choice this conversation was left with. "本次不计入
+    /// 记忆" is a decision about the conversation, so it has to outlive the
     /// connection that happened to be carrying it.
     recording: bool,
 }
 
-/// Opens the history row this connection writes to, or `None` when nothing
-/// is being recorded.
-fn start_conversation_row(app: &AppHandle, character_id: &str, recording: bool) -> Option<String> {
-    if !recording {
-        return None;
-    }
+/// Opens the history row this connection writes to. Every conversation gets
+/// one, whether or not it will count toward long-term memory; `None` only
+/// when the database refused.
+fn start_conversation_row(app: &AppHandle, character_id: &str) -> Option<String> {
     let state = app.state::<AppState>();
     let conn = match state.db.lock() {
         Ok(conn) => conn,
@@ -544,7 +635,12 @@ struct Connected {
     /// `recording`: this decides whether the choice exists, `recording` is the
     /// choice currently made for this one conversation.
     memory_enabled: bool,
+    /// Whether this conversation will be summarized into long-term memory
+    /// when it ends. Its transcript goes into the history regardless.
     recording: bool,
+    /// Fresh sitting with an unfinished thread: ask the model to say one
+    /// sentence once the mic is open, before the user has spoken.
+    announce_open_loop: bool,
 }
 
 async fn run(
@@ -591,7 +687,7 @@ async fn run(
                     // Mic is definitely closed before any connection exists,
                     // so toggling can only mean "open".
                     Some(SessionCommand::StartTalking) | Some(SessionCommand::ToggleTalking) => {
-                        break true
+                        break true;
                     }
                     Some(SessionCommand::SwitchCharacter(id)) => {
                         persist_current_character(&app, &id);
@@ -617,7 +713,8 @@ async fn run(
             character_name,
             memory_enabled,
             mut recording,
-        } = match connect_with_config(&app).await {
+            mut announce_open_loop,
+        } = match connect_with_config(&app, carried_conversation.as_ref()).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("realtime connect failed: {e}");
@@ -632,15 +729,15 @@ async fn run(
 
         let carried = match carried_conversation.take() {
             // Carried into a connection it no longer belongs to — the current
-            // character changed while reconnecting, or memory was switched
-            // off for this one in the editor meanwhile. Close the row out
-            // rather than leaving it open forever.
-            Some(carried) if carried.character_id != character_id || !memory_enabled => {
+            // character changed while reconnecting. Close the row out rather
+            // than leaving it open forever.
+            Some(carried) if carried.character_id != character_id => {
                 finalize_conversation(
                     &app,
                     &carried.character_id,
                     &carried.character_name,
                     &carried.id,
+                    carried.recording,
                 )
                 .await;
                 None
@@ -648,9 +745,11 @@ async fn run(
             same_conversation => same_conversation,
         };
         // `recording` arrives here as the character's `memory_enabled`, which
-        // keeps the last word — but within that, a resumed conversation keeps
-        // the choice it was left with. An opt-out that lasted only until the
-        // next dropped socket was never really an opt-out.
+        // keeps the last word — memory switched off in the editor meanwhile
+        // takes the resumed conversation out of memory too. Within that, a
+        // resumed conversation keeps the choice it was left with: an opt-out
+        // that lasted only until the next dropped socket was never really an
+        // opt-out.
         if let Some(carried) = &carried {
             recording = recording && carried.recording;
         }
@@ -659,10 +758,9 @@ async fn run(
         let mut conversation_id: Option<String> = match carried {
             // Keep writing to the row the dropped connection opened, so a
             // sitting the user never saw interrupted stays one row in the
-            // history list. Kept even while recording is paused: the row is
-            // what a later `SetRecording(true)` goes back to writing into.
+            // history list.
             Some(carried) => Some(carried.id),
-            None => start_conversation_row(&app, &character_id, recording),
+            None => start_conversation_row(&app, &character_id),
         };
         set_active_conversation(&app, &active_conversation, conversation_id.clone());
 
@@ -677,6 +775,21 @@ async fn run(
         // text, stuttering audio). Cleared when that cancelled response's
         // `response.done` arrives.
         let mut dropping_stale = false;
+        // `response.done` events still belonging to a cancelled line.
+        // One for a normal interrupt. A backchannel that has to swallow both
+        // the original line and the reply the server started for the "嗯"
+        // sets this higher.
+        let mut dones_left: u8 = 0;
+        // Speech started over a reply, and we have not yet decided whether
+        // it is a backchannel or an interruption.
+        let mut barge_started: Option<Instant> = None;
+        let mut overlap_until: Option<Instant> = None;
+        let mut opener_grace: Option<Instant> = None;
+        let mut heard_user = false;
+        // A backchannel arrived while the line was still being generated.
+        // When that line finishes, drop the reply the server starts for the
+        // "嗯" instead of cancelling the line itself.
+        let mut drop_followup = false;
         // Set when `speech_stopped` fires while `dropping_stale` is still
         // true — the user finished a barge-in utterance before the server
         // confirmed cancelling the response it interrupted. Sending
@@ -712,11 +825,53 @@ async fn run(
         emit_mic(&app, &mic_open, is_talking);
 
         let reason = loop {
+            // Once, on a fresh sitting, before any user speech: the
+            // instructions already say to raise one unfinished thread.
+            if announce_open_loop
+                && is_talking
+                && !heard_user
+                && !is_responding
+                && !dropping_stale
+                && barge_started.is_none()
+            {
+                match client::send_event(&mut sink, &ClientEvent::ResponseCreate {}).await {
+                    Ok(()) => {
+                        announce_open_loop = false;
+                        opener_grace = Some(Instant::now() + Duration::from_secs(3));
+                        tracing::info!("requesting an open-loop opener");
+                    }
+                    Err(_) => {
+                        break Disconnect::Error(
+                            crate::tr!("Failed to send the request", "发送请求失败").into(),
+                        );
+                    }
+                }
+            }
             tokio::select! {
                 _ = sleep_until_owned(idle_deadline) => {
                     tracing::info!("realtime session idle timeout, closing");
                     let _ = sink.close().await;
                     break Disconnect::Idle;
+                }
+                _ = barge_confirm_sleep(barge_started), if barge_started.is_some() => {
+                    barge_started = None;
+                    drop_followup = false;
+                    tracing::info!("barge-in confirmed");
+                    if let Some(p) = &playback_handle {
+                        p.clear();
+                    }
+                    if is_responding {
+                        let _ = client::send_event(&mut sink, &ClientEvent::ResponseCancel {}).await;
+                        is_responding = false;
+                        dropping_stale = true;
+                        dones_left = 1;
+                        assistant_text.clear();
+                    }
+                    last_delta_at = None;
+                    emit_state(
+                        &app,
+                        if is_talking { ChatState::Listening } else { ChatState::Idle },
+                    );
                 }
                 cmd = cmd_rx.recv() => {
                     idle_deadline = Instant::now() + IDLE_TIMEOUT;
@@ -733,20 +888,29 @@ async fn run(
                         // mic here doesn't risk submitting a mid-sentence,
                         // unfinished one.
                         Some(SessionCommand::StartTalking) => {
-                            set_mic_open(&app, true, &mut is_talking, &mut is_responding, &mut dropping_stale, &mut pending_commit, &mut assistant_text, &capture_ctrl, &playback_handle, &mut sink, &mic_open).await;
+                            barge_started = None;
+                            drop_followup = false;
+                            set_mic_open(&app, true, &mut is_talking, &mut is_responding, &mut dropping_stale, &mut dones_left, &mut pending_commit, &mut assistant_text, &capture_ctrl, &playback_handle, &mut sink, &mic_open).await;
                         }
                         Some(SessionCommand::StopTalking) => {
-                            set_mic_open(&app, false, &mut is_talking, &mut is_responding, &mut dropping_stale, &mut pending_commit, &mut assistant_text, &capture_ctrl, &playback_handle, &mut sink, &mic_open).await;
+                            barge_started = None;
+                            drop_followup = false;
+                            set_mic_open(&app, false, &mut is_talking, &mut is_responding, &mut dropping_stale, &mut dones_left, &mut pending_commit, &mut assistant_text, &capture_ctrl, &playback_handle, &mut sink, &mic_open).await;
                         }
                         Some(SessionCommand::ToggleTalking) => {
-                            set_mic_open(&app, !is_talking, &mut is_talking, &mut is_responding, &mut dropping_stale, &mut pending_commit, &mut assistant_text, &capture_ctrl, &playback_handle, &mut sink, &mic_open).await;
+                            barge_started = None;
+                            drop_followup = false;
+                            set_mic_open(&app, !is_talking, &mut is_talking, &mut is_responding, &mut dropping_stale, &mut dones_left, &mut pending_commit, &mut assistant_text, &capture_ctrl, &playback_handle, &mut sink, &mic_open).await;
                         }
                         Some(SessionCommand::Interrupt) => {
+                            barge_started = None;
+                            drop_followup = false;
                             if is_responding {
                                 if let Some(p) = &playback_handle { p.clear(); }
                                 let _ = client::send_event(&mut sink, &ClientEvent::ResponseCancel {}).await;
                                 is_responding = false;
                                 dropping_stale = true;
+                                dones_left = 1;
                                 assistant_text.clear();
                             }
                         }
@@ -761,8 +925,10 @@ async fn run(
                         Some(SessionCommand::SetRecording(on)) => {
                             // The Chat tab hides the toggle when the character
                             // has memory off, so this should be unreachable —
-                            // but a stray command must never switch recording
-                            // on for a character that opted out of memory.
+                            // but a stray command must never switch memory on
+                            // for a character that opted out of it. Only what
+                            // happens at the end changes: the transcript keeps
+                            // going into the history either way.
                             if memory_enabled {
                                 recording = on;
                                 emit_recording(&app, Some(recording));
@@ -801,9 +967,14 @@ async fn run(
                                 &mut assistant_text,
                                 &mut is_responding,
                                 &mut dropping_stale,
+                                &mut dones_left,
+                                &mut barge_started,
+                                &mut overlap_until,
+                                &opener_grace,
+                                &mut heard_user,
+                                &mut drop_followup,
                                 &mut pending_commit,
                                 conversation_id.as_deref(),
-                                recording,
                                 &mut last_delta_at,
                                 is_talking,
                                 &mut turn_count,
@@ -857,6 +1028,9 @@ async fn run(
         if let Some(c) = &capture_ctrl {
             c.set_capturing(false);
         }
+        // A reply the connection dropped in the middle of never gets its
+        // `response.done`, so this is the last chance to end its line.
+        finish_subtitle_line(&app, &playback_handle);
 
         // A reconnect nobody asked for — a dropped socket, or the turn/audio
         // cap rolling the session — is invisible to the user, who is still in
@@ -870,8 +1044,10 @@ async fn run(
             if carry_conversation {
                 // Rolling means the server-side context ran out, so the next
                 // connection's instructions have to carry the conversation
-                // instead. The row itself stays open, and stays live.
-                if matches!(&reason, Disconnect::Rolling) {
+                // instead. The row itself stays open, and stays live. One
+                // that doesn't count toward memory carries on through its
+                // recent lines alone (see `connect_with_config`).
+                if matches!(&reason, Disconnect::Rolling) && recording {
                     summarize_into_memory(&app, &character_id, &character_name, &conv_id).await;
                 }
                 carried_conversation = Some(CarriedConversation {
@@ -880,12 +1056,27 @@ async fn run(
                     character_name: character_name.clone(),
                     recording,
                 });
+            } else if matches!(&reason, Disconnect::SwitchCharacter) {
+                // Editing the live character reconnects at once. Summarizing
+                // the conversation just ended is a model call (16.9s in the
+                // run that froze the start button) and the actor cannot open
+                // the mic while it awaits that call. The summary still lands
+                // in long-term memory; this sitting just doesn't wait for it.
+                set_active_conversation(&app, &active_conversation, None);
+                let app = app.clone();
+                let character_id = character_id.clone();
+                let character_name = character_name.clone();
+                tauri::async_runtime::spawn(async move {
+                    finalize_conversation(&app, &character_id, &character_name, &conv_id, recording)
+                        .await;
+                });
             } else {
                 // The session has stopped writing to this conversation, so the
                 // Chat tab should stop showing its row as live now rather than
                 // after the naming and summarization round trips below.
                 set_active_conversation(&app, &active_conversation, None);
-                finalize_conversation(&app, &character_id, &character_name, &conv_id).await;
+                finalize_conversation(&app, &character_id, &character_name, &conv_id, recording)
+                    .await;
             }
         }
 
@@ -922,6 +1113,21 @@ async fn sleep_until_owned(deadline: Instant) {
     tokio::time::sleep_until(deadline).await;
 }
 
+async fn barge_confirm_sleep(started: Option<Instant>) {
+    match started {
+        Some(t) => tokio::time::sleep_until(t + BARGE_CONFIRM).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn is_overlap_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("in progress")
+        || lower.contains("another response")
+        || message.contains("正在进行")
+        || message.contains("进行中")
+}
+
 async fn recv_frame(rx: &mut Option<capture::FrameReceiver>) -> Option<Vec<u8>> {
     match rx {
         Some(r) => r.recv().await,
@@ -936,8 +1142,12 @@ async fn recv_level(rx: &mut Option<capture::LevelReceiver>) -> Option<f32> {
     }
 }
 
-async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
-    let api_key = secrets::get_api_key().ok_or_else(|| crate::tr!("No API key configured yet", "尚未配置 API Key").to_string())?;
+async fn connect_with_config(
+    app: &AppHandle,
+    carried: Option<&CarriedConversation>,
+) -> Result<Connected, String> {
+    let api_key = secrets::get_api_key()
+        .ok_or_else(|| crate::tr!("No API key configured yet", "尚未配置 API Key").to_string())?;
     let (workspace_id, region, current_char, vad_threshold, vad_silence_ms) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -960,22 +1170,60 @@ async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
             .map_err(|e| e.to_string())?
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(DEFAULT_VAD_SILENCE_MS);
-        (workspace_id, region, character, vad_threshold, vad_silence_ms)
+        (
+            workspace_id,
+            region,
+            character,
+            vad_threshold,
+            vad_silence_ms,
+        )
     };
 
-    let memories = if current_char.memory_enabled {
+    // A dropped socket or a rolled context is still the same sitting. The
+    // new connection's server memory is empty, so the last few lines have
+    // to ride along in the instructions — memory or not, since they are what
+    // the model was holding a moment ago rather than anything remembered from
+    // an earlier conversation. A different character is a different sitting,
+    // so those lines stay out.
+    let continuing_id =
+        carried.and_then(|c| (c.character_id == current_char.id).then(|| c.id.clone()));
+
+    let (memories, recent_turns) = {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        memory::top_k_memories(&conn, &current_char.id)?
-    } else {
-        Vec::new()
+        let memories = if current_char.memory_enabled {
+            memory::select_for_injection(&conn, &current_char.id)?
+        } else {
+            Vec::new()
+        };
+        let recent_turns = match continuing_id.as_deref() {
+            Some(id) => {
+                let messages = message_store::list_messages(&conn, id).unwrap_or_else(|e| {
+                    tracing::error!("failed to list messages for resume: {e}");
+                    Vec::new()
+                });
+                let pairs: Vec<(&str, &str)> = messages
+                    .iter()
+                    .map(|m| (m.role.as_str(), m.text.as_str()))
+                    .collect();
+                format_recent_turns(&current_char.name, &pairs)
+            }
+            None => None,
+        };
+        (memories, recent_turns)
     };
+    let has_open_loop = memories
+        .iter()
+        .any(|m| m.kind == "open_loop" && !m.content.trim().is_empty());
     let memory_block = if memories.is_empty() {
         None
     } else {
         let flash = FlashClient::new(api_key.clone(), workspace_id.clone(), region.as_deref());
         memory::build_injection_block(&flash, &memories).await
     };
+    let invite_open_loop = continuing_id.is_none()
+        && has_open_loop
+        && memory_block.as_ref().is_some_and(|m| !m.trim().is_empty());
 
     let url = client::realtime_url(workspace_id.as_deref(), region.as_deref());
     let (mut sink, source) = client::connect(&url, &api_key).await?;
@@ -986,6 +1234,8 @@ async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
         language: &current_char.language,
         speech_habits: &current_char.speech_habits,
         memory_block: memory_block.as_deref(),
+        recent_turns: recent_turns.as_deref(),
+        invite_open_loop,
     });
 
     let turn_detection = Some(TurnDetection::ServerVad {
@@ -997,7 +1247,10 @@ async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
     let session_update = ClientEvent::SessionUpdate {
         session: SessionConfig {
             modalities: vec!["text".into(), "audio".into()],
-            voice: current_char.voice_id.clone().unwrap_or_else(|| FALLBACK_VOICE.into()),
+            voice: current_char
+                .voice_id
+                .clone()
+                .unwrap_or_else(|| FALLBACK_VOICE.into()),
             instructions,
             input_audio_format: "pcm".into(),
             output_audio_format: "pcm".into(),
@@ -1014,6 +1267,7 @@ async fn connect_with_config(app: &AppHandle) -> Result<Connected, String> {
         character_name: current_char.name,
         memory_enabled: current_char.memory_enabled,
         recording: current_char.memory_enabled,
+        announce_open_loop: invite_open_loop,
     })
 }
 
@@ -1040,9 +1294,14 @@ fn handle_server_event(
     assistant_text: &mut String,
     is_responding: &mut bool,
     dropping_stale: &mut bool,
+    dones_left: &mut u8,
+    barge_started: &mut Option<Instant>,
+    overlap_until: &mut Option<Instant>,
+    opener_grace: &Option<Instant>,
+    heard_user: &mut bool,
+    drop_followup: &mut bool,
     pending_commit: &mut bool,
     conversation_id: Option<&str>,
-    recording: bool,
     last_delta_at: &mut Option<Instant>,
     is_talking: bool,
     turn_count: &mut u32,
@@ -1070,25 +1329,77 @@ fn handle_server_event(
             ServerAction::None
         }
         ServerEvent::SpeechStarted {} => {
-            // Barge-in: the user started talking while a response was in
-            // flight. Silence locally right away — don't wait on the
-            // network round trip to the server's own cancel ack.
-            let action = if *is_responding {
+            *heard_user = true;
+            // Don't cut on the first sound. A short "嗯" should leave the
+            // line playing; only speech that lasts past `BARGE_CONFIRM`
+            // takes the floor. An explicit interrupt or opening the mic
+            // still cuts immediately — those aren't this event.
+            if *is_responding && barge_started.is_none() && !*dropping_stale {
+                *barge_started = Some(Instant::now());
+                tracing::info!("speech over a reply; waiting before cutting");
+                return ServerAction::None;
+            }
+            // A gate left up for a backchannel reply must not swallow the
+            // next thing the user actually says.
+            if !*is_responding && *dropping_stale && barge_started.is_none() {
+                *dropping_stale = false;
+                *dones_left = 0;
+                *overlap_until = Some(Instant::now() + OVERLAP_ERROR_HOLD);
+                *last_delta_at = None;
+                emit_state(app, ChatState::Listening);
+                return ServerAction::CancelResponse;
+            }
+            *last_delta_at = None;
+            if !*is_responding {
+                emit_state(app, ChatState::Listening);
+            }
+            ServerAction::None
+        }
+        ServerEvent::SpeechStopped {} => {
+            if let Some(started) = barge_started.take() {
+                if started.elapsed() < BARGE_CONFIRM {
+                    *overlap_until = Some(Instant::now() + OVERLAP_ERROR_HOLD);
+                    tracing::info!("backchannel; keeping the current line");
+                    if !*is_responding {
+                        // The server already ended the line on its own. This
+                        // speech_stopped would start a reply to the "嗯".
+                        // Cancel that, and leave audio already buffered playing.
+                        *dropping_stale = true;
+                        *dones_left = 1;
+                        return ServerAction::CancelResponse;
+                    }
+                    *drop_followup = true;
+                    return ServerAction::None;
+                }
+                tracing::info!("barge-in confirmed at speech stop");
+                *drop_followup = false;
+                if *is_responding {
+                    if let Some(p) = playback {
+                        p.clear();
+                    }
+                    *is_responding = false;
+                    *dropping_stale = true;
+                    *dones_left = 1;
+                    assistant_text.clear();
+                    *last_delta_at = None;
+                    if is_talking {
+                        reserve_user_bubble(app);
+                        *pending_commit = true;
+                    }
+                    emit_state(
+                        app,
+                        if is_talking {
+                            ChatState::Listening
+                        } else {
+                            ChatState::Idle
+                        },
+                    );
+                    return ServerAction::CancelResponse;
+                }
                 if let Some(p) = playback {
                     p.clear();
                 }
-                *is_responding = false;
-                *dropping_stale = true;
-                assistant_text.clear();
-                ServerAction::CancelResponse
-            } else {
-                ServerAction::None
-            };
-            *last_delta_at = None;
-            emit_state(app, ChatState::Listening);
-            action
-        }
-        ServerEvent::SpeechStopped {} => {
+            }
             // The only turn boundary there is — the user paused, submit
             // what they said. Guarded on `is_talking` in case this arrives
             // just after the mic was manually closed.
@@ -1102,14 +1413,7 @@ fn handle_server_event(
                 // boundary occurred, so the UI doesn't show the reply above
                 // the message that prompted it. Filled in once the real
                 // transcript event arrives (see `InputAudioTranscriptionCompleted`).
-                let _ = app.emit(
-                    "chat:transcript",
-                    TranscriptEvent {
-                        role: "user",
-                        text: String::new(),
-                        done: false,
-                    },
-                );
+                reserve_user_bubble(app);
                 if *dropping_stale {
                     // A barge-in just interrupted the previous response and
                     // this utterance ended before the server confirmed
@@ -1127,6 +1431,16 @@ fn handle_server_event(
             }
         }
         ServerEvent::ResponseAudioDelta { delta } => {
+            // The original line already ended during the confirm window, so
+            // this delta is a new reply (usually to a backchannel). Drop it
+            // until that reply's own `response.done`.
+            if barge_started.is_some() && !*is_responding {
+                *dropping_stale = true;
+                if *dones_left == 0 {
+                    *dones_left = 1;
+                }
+                return ServerAction::None;
+            }
             if *dropping_stale {
                 return ServerAction::None;
             }
@@ -1149,11 +1463,25 @@ fn handle_server_event(
             ServerAction::None
         }
         ServerEvent::ResponseAudioTranscriptDelta { delta } => {
+            if barge_started.is_some() && !*is_responding {
+                *dropping_stale = true;
+                if *dones_left == 0 {
+                    *dones_left = 1;
+                }
+                return ServerAction::None;
+            }
             if *dropping_stale {
                 return ServerAction::None;
             }
             if !*is_responding {
                 note_turn_started(app, is_responding, turn_count, captured_ms, pending_roll);
+            }
+            // Checked once and reused below rather than asking twice: cheap
+            // either way, but there's no reason to look the window up more
+            // than once per delta.
+            let subtitle_open = subtitle::is_open(app);
+            if subtitle_open && assistant_text.is_empty() {
+                subtitle::begin_line();
             }
             assistant_text.push_str(&delta);
             let _ = app.emit(
@@ -1164,6 +1492,11 @@ fn handle_server_event(
                     done: false,
                 },
             );
+            if subtitle_open {
+                let line_id = subtitle::current_line();
+                subtitle::emit_line(app, line_id, assistant_text.as_str(), false);
+                subtitle::translate_line(app, line_id, assistant_text.as_str(), false);
+            }
             ServerAction::None
         }
         ServerEvent::ResponseAudioTranscriptDone { transcript } => {
@@ -1179,11 +1512,14 @@ fn handle_server_event(
                     done: true,
                 },
             );
+            if subtitle::is_open(app) {
+                let line_id = subtitle::current_line();
+                subtitle::emit_line(app, line_id, &text, true);
+                subtitle::translate_line(app, line_id, &text, true);
+            }
             assistant_text.clear();
-            if recording {
-                if let Some(conv_id) = conversation_id {
-                    persist_message(app, conv_id, "assistant", &text);
-                }
+            if let Some(conv_id) = conversation_id {
+                persist_message(app, conv_id, "assistant", &text);
             }
             ServerAction::None
         }
@@ -1196,16 +1532,42 @@ fn handle_server_event(
                     done: true,
                 },
             );
-            if recording {
-                if let Some(conv_id) = conversation_id {
-                    persist_message(app, conv_id, "user", &transcript);
-                }
+            if let Some(conv_id) = conversation_id {
+                persist_message(app, conv_id, "user", &transcript);
             }
             ServerAction::None
         }
         ServerEvent::ResponseDone {} => {
+            // Every branch below ends some response, whether it's the line
+            // on screen finishing normally, or one cut off by a barge-in
+            // (its audio already cleared, so this fires right away).
+            finish_subtitle_line(app, playback);
+            if *drop_followup && !*dropping_stale {
+                *drop_followup = false;
+                *is_responding = false;
+                *last_delta_at = None;
+                *dropping_stale = true;
+                *dones_left = 1;
+                emit_state(
+                    app,
+                    if is_talking {
+                        ChatState::Listening
+                    } else {
+                        ChatState::Idle
+                    },
+                );
+                return ServerAction::None;
+            }
             if *dropping_stale {
-                // This was the cancelled response's own done event.
+                // This was a cancelled response's own done event. A
+                // backchannel may still be waiting on a second one — the
+                // reply the server started for the overlap — and clearing
+                // the gate on the first would let that reply play.
+                if *dones_left > 1 {
+                    *dones_left -= 1;
+                    return ServerAction::None;
+                }
+                *dones_left = 0;
                 *dropping_stale = false;
                 if *pending_commit {
                     // A barge-in utterance finished while we were still
@@ -1229,7 +1591,11 @@ fn handle_server_event(
             // than "idle" (which reads as the conversation having ended).
             emit_state(
                 app,
-                if is_talking { ChatState::Listening } else { ChatState::Idle },
+                if is_talking {
+                    ChatState::Listening
+                } else {
+                    ChatState::Idle
+                },
             );
             ServerAction::None
         }
@@ -1241,6 +1607,16 @@ fn handle_server_event(
                 (Some(code), None) => code,
                 (None, None) => crate::tr!("Unknown error", "未知错误").to_string(),
             };
+            if opener_grace.is_some_and(|until| Instant::now() < until) {
+                tracing::warn!("ignored error during open-loop opener: {message}");
+                return ServerAction::None;
+            }
+            if overlap_until.is_some_and(|until| Instant::now() < until)
+                && is_overlap_error(&message)
+            {
+                tracing::info!("ignored turn-overlap error: {message}");
+                return ServerAction::None;
+            }
             emit_state(app, ChatState::Error(message));
             ServerAction::None
         }

@@ -26,6 +26,7 @@ export const en = {
   "common.edit": "Edit",
   "common.back": "Back",
   "common.notSet": "Not set",
+  "common.close": "Close",
 
   // ---- Chat ----
   "chat.state.idle": "Idle",
@@ -35,19 +36,37 @@ export const en = {
   "chat.state.speaking": "Speaking",
   "chat.state.error": "Something went wrong",
   "chat.memory.on": "Memory: on",
-  "chat.memory.off": "Not saving this one",
+  "chat.memory.off": "Not remembering this one",
   "chat.memory.onTitle": "This conversation will be saved to long-term memory",
-  "chat.memory.offTitle": "This conversation won't be saved to long-term memory",
+  "chat.memory.offTitle":
+    "This conversation won't be saved to long-term memory, but it stays in your history",
   "chat.empty":
     "Click the button below to open the mic. Your turn is sent automatically once you pause, and you can cut the AI off just by speaking…",
   "chat.emptyWithHotkey":
     "Click the button below, or press {hotkey}, to open the mic. Your turn is sent automatically once you pause, and you can cut the AI off just by speaking…",
   "chat.micOff": "Click to start talking",
   "chat.micOn": "Click to close the mic",
+  "chat.transcribing": "Transcribing…",
+  "chat.noCharacter": "No character selected",
+  "chat.needApiKey": "Set up an API key first",
+  "chat.switchCharacter": "Switch character",
+  "chat.manageCharacters": "Manage characters…",
+  "chat.switchedNotice": "Your conversation with {name} has ended and is saved in their history",
+
+  // ---- First run (no API key yet) ----
+  "onboarding.title": "Welcome to VoiceChat",
+  "onboarding.body":
+    "Before you can talk, the app needs an Alibaba Cloud Model Studio (DashScope) API key — speech recognition, the conversation and the voice all run through it.",
+  "onboarding.step1": "Create an API key in the Model Studio console",
+  "onboarding.step2": "Paste it under Settings › Connection and save it",
+  "onboarding.step3": "Come back here and click the button below to start talking",
+  "onboarding.cta": "Set up the API key",
 
   // ---- Chat history sidebar ----
   "history.title": "History",
-  "history.new": "+ New conversation",
+  "history.collapse": "Collapse history",
+  "history.expand": "Expand history",
+  "history.new": "New conversation",
   "history.newDisabledTitle": "Already a new conversation — nothing to save yet",
   "history.empty": "Conversations appear here once you have talked.",
   "history.live": "Live",
@@ -60,26 +79,94 @@ export const en = {
   "history.deleteTitle": "Delete this conversation?",
   "history.deleteBody":
     "Its transcript is deleted with it and cannot be recovered. What the character remembers from it stays in long-term memory.",
+  "history.deleteBodyUnmemorized":
+    "Its transcript is deleted with it and cannot be recovered.",
   "history.loadFailed": "Couldn’t open that conversation",
 
   // ---- Character list ----
   "characters.title": "Characters",
-  "characters.new": "+ New character",
+  "characters.new": "New character",
   "characters.current": "Current",
   "characters.noPersona": "(No persona yet)",
   "characters.noVoice": "No voice set",
-  "characters.switchHint": "Double-click to switch",
+  "characters.currentTitle": "The character you're talking to",
+  "characters.noSpeechHabits": "(None yet)",
+  "characters.startChat": "Start chatting",
+  "characters.startChatTitle":
+    "Switch to this character and open the chat — a conversation in progress is ended and saved to the history",
+  "characters.backToChat": "Back to the chat",
   "characters.switching": "Switching…",
+  "characters.stats.memory": "Long-term memory",
+  "characters.stats.memoryOn": "On · {count} saved",
+  "characters.stats.memoryOnPlain": "On",
+  "characters.stats.memoryOff": "Off",
+  "characters.stats.history": "History window",
+  "characters.stats.historyValue": "{count} turns",
+  "characters.stats.conversations": "Conversations",
+  "characters.stats.conversationsValue": "{count}",
+  "characters.stats.lastChat": "Last {when}",
   "characters.memory": "Memory",
+  "characters.deleteLastTitle":
+    "There has to be at least one character — create another before deleting this one",
   "characters.deleteTitle": "Delete character “{name}”?",
   "characters.deleteBody":
     "Every conversation and long-term memory belonging to this character goes with it, and cannot be recovered.",
+
+  // ---- Avatars ----
+  "avatar.label": "Avatar",
+  "avatar.title": "Set avatar",
+  "avatar.set": "Add an avatar",
+  "avatar.change": "Change avatar",
+  "avatar.remove": "Remove",
+  "avatar.tab.upload": "Upload",
+  "avatar.tab.generate": "Generate with AI",
+  "avatar.choose": "Choose an image",
+  "avatar.chooseHint": "PNG, JPEG, WebP… up to 20 MB — you can crop it next",
+  "avatar.notImage": "That file isn't an image",
+  "avatar.tooLarge": "That image is over {mb} MB",
+  "avatar.unreadable": "Couldn't open that image — try a PNG or JPEG instead",
+  "avatar.describe": "Describe the avatar",
+  "avatar.describePlaceholder":
+    "e.g. a girl with short silver hair and round glasses, smiling",
+  "avatar.style": "Style",
+  "avatar.style.anime": "Anime",
+  "avatar.style.realistic": "Realistic",
+  "avatar.style.cartoon3d": "3D cartoon",
+  "avatar.style.watercolor": "Watercolor",
+  "avatar.style.flat": "Flat illustration",
+  "avatar.stylePrompt.anime":
+    "Japanese anime-style illustration, clean line art, soft cel shading",
+  "avatar.stylePrompt.realistic":
+    "Realistic portrait photograph, soft natural light, shallow depth of field",
+  "avatar.stylePrompt.cartoon3d":
+    "3D cartoon render, rounded and cute, soft studio lighting",
+  "avatar.stylePrompt.watercolor":
+    "Watercolor illustration, soft brushstrokes, gentle colors",
+  "avatar.stylePrompt.flat":
+    "Flat vector illustration, simple shapes, clean bold colors",
+  "avatar.promptSuffix":
+    "Avatar composition: a single character, head and shoulders, face centered and looking at the viewer, simple clean background, no text anywhere in the image",
+  "avatar.generate": "Generate",
+  "avatar.generateHint":
+    "Drawn by Qwen-Image (qwen-image-3.0) with your Model Studio API key; each image is billed to that account.",
+  "avatar.generating": "Generating… {seconds}s",
+  "avatar.generatingHint": "This usually takes 10–30 seconds",
+  "avatar.regenerate": "Try again",
+  "avatar.use": "Use this avatar",
+  "avatar.cropHint": "Drag to reposition · scroll to zoom",
+  "avatar.cropLabel": "Avatar crop area",
+  "avatar.zoom": "Zoom",
+  "avatar.zoomIn": "Zoom in",
+  "avatar.zoomOut": "Zoom out",
 
   // ---- Character editor ----
   "characterEdit.newTitle": "New character",
   "characterEdit.editTitle": "Edit character",
   "characterEdit.name": "Name",
   "characterEdit.nameRequired": "Please give the character a name",
+  "characterEdit.nameTooLong":
+    "Names can be up to 12 Chinese characters or 24 Latin letters",
+  "characterEdit.nameWidthTitle": "Chinese characters count as 2",
   "characterEdit.language": "Language",
   "characterEdit.polish": "Let AI write the persona",
   "characterEdit.polishPlaceholder": "Describe this character in one sentence…",
@@ -91,6 +178,13 @@ export const en = {
   "characterEdit.openVoiceStudio": "Open Voice Studio",
   "characterEdit.memoryEnabled": "Enable long-term memory",
   "characterEdit.maxHistoryTurns": "Max history turns ({count})",
+  "characterEdit.polished":
+    "Persona and speech habits were replaced with the AI's version.",
+  "characterEdit.undoPolish": "Undo",
+  "characterEdit.discardTitle": "Discard unsaved changes?",
+  "characterEdit.discardBody":
+    "Your changes to this character haven't been saved and will be lost if you leave now.",
+  "characterEdit.discardConfirm": "Discard changes",
 
   // The language a character speaks — unrelated to the display language.
   "language.zh": "Chinese",
@@ -98,12 +192,17 @@ export const en = {
   "language.en": "English",
   "language.auto": "Follow the user",
 
+  "voiceKind.preset": "Preset voice",
+  "voiceKind.cloned": "Cloned voice",
+  "voiceKind.designed": "Designed voice",
+
   // ---- Voice studio ----
   "voice.title": "Voice Studio",
   "voice.tab.preset": "Presets",
   "voice.tab.cloud": "Cloud voices",
   "voice.tab.clone": "Clone a recording",
   "voice.tab.design": "Design from text",
+  "voice.current": "Current",
   "voice.preset.hint":
     "Preset voices have no online samples to audition — pick one by name.",
   "voice.preset.longanqian.name": "Long'anqian",
@@ -129,8 +228,8 @@ export const en = {
   "voice.cloud.unusableTitle": "This voice can't be used for live conversation",
   "voice.clone.recordHint":
     "Record 10–20 seconds of clear speech in the app (60 s max).",
-  "voice.clone.start": "● Start recording",
-  "voice.clone.stop": "■ Stop recording",
+  "voice.clone.start": "Start recording",
+  "voice.clone.stop": "Stop recording ({elapsed} / {max})",
   "voice.clone.cloning": "Cloning…",
   "voice.clone.useRecording": "Clone from this recording",
   "voice.clone.fileHint":
@@ -159,10 +258,11 @@ export const en = {
   "memory.deselectAll": "Deselect all",
   "memory.deleteSelected": "Delete selected",
   "memory.empty":
-    "No memories yet. Switch on “Enable long-term memory” and chat for a few turns — summaries and facts will start showing up here.",
+    "No memories yet. Switch on “Enable long-term memory” and chat for a few turns — summaries, open threads and facts will start showing up here.",
   "memory.kind.summary": "Summary",
   "memory.kind.fact": "Fact",
   "memory.kind.profile": "Profile",
+  "memory.kind.openLoop": "Open thread",
   "memory.deleteTitle": "Delete this memory?",
   "memory.deleteSelectedTitle": "Delete the {count} selected memories?",
   "memory.deleteSelectedBody":
@@ -170,6 +270,11 @@ export const en = {
 
   // ---- Settings ----
   "settings.title": "Settings",
+  "settings.nav.general": "General",
+  "settings.nav.connection": "Connection",
+  "settings.nav.conversation": "Conversation",
+  "settings.nav.connectionMissing": "No API key configured yet",
+  "settings.autosave": "Changes are saved as you make them",
   "settings.language.heading": "Display language",
   "settings.language.hint":
     "Applies to the app's own interface. What language a character speaks is set on that character.",
@@ -177,7 +282,14 @@ export const en = {
   "settings.apiKey.configured": "Configured ({tail})",
   "settings.apiKey.missing": "Not configured yet",
   "settings.apiKey.clear": "Clear",
-  "settings.optional.heading": "Optional",
+  "settings.apiKey.hint":
+    "Paste it in, then press Enter or click Save. You can create one in the Model Studio console.",
+  "settings.apiKey.show": "Show key",
+  "settings.apiKey.hide": "Hide key",
+  "settings.apiKey.clearTitle": "Clear the API key?",
+  "settings.apiKey.clearBody":
+    "Voice chat, voice cloning and persona writing all stop working until a key is entered again.",
+  "settings.optional.heading": "Endpoint (optional)",
   "settings.optional.workspaceId": "WorkspaceId",
   "settings.optional.workspacePlaceholder":
     "Leave blank to use the legacy domain",
@@ -186,7 +298,6 @@ export const en = {
   "settings.optional.regionFallback": "Beijing",
   "settings.optional.hint":
     "Voice cloning/design and realtime conversation are only available in these two regions; the one closer to you will be faster. Test connectivity again after switching.",
-  "settings.saveConfig": "Save settings",
   "settings.vad.heading": "Hands-free detection",
   "settings.vad.hint":
     "Controls how readily the app hears you speaking while the mic is open, and how long a pause counts as you being done.",
@@ -194,12 +305,28 @@ export const en = {
   "settings.vad.silence": "Silence cutoff ({ms}ms)",
   "settings.hotkey.heading": "Global hotkey",
   "settings.hotkey.hint":
-    "Press it in any window to toggle the mic. Click the button below, then press the combination you want.",
-  "settings.hotkey.capturing": "Press the new hotkey…",
+    "Press it in any window to toggle the mic. Click the box below, then press the combination you want — it's saved as soon as you do.",
+  "settings.hotkey.capturing": "Press the new hotkey… (Esc to cancel)",
   "settings.hotkey.disable": "Disable",
+  "settings.subtitle.heading": "Desktop subtitle",
+  "settings.subtitle.hint":
+    "A borderless caption, always on top, showing the assistant's replies. Click-through by default, so it never blocks whatever's underneath it.",
+  "settings.subtitle.enable": "Show desktop subtitle",
+  "settings.subtitle.translate": "Show translation",
+  "settings.subtitle.translateHint":
+    "Translated into the app's display language and shown under the original line.",
+  "settings.subtitle.adjust": "Adjust position…",
+  "settings.subtitle.adjustDone": "Done adjusting",
+  "settings.subtitle.adjustHint":
+    "Drag the sample caption to where you want it, then click “Done adjusting”.",
+  "subtitle.sample": "This is what your subtitle will look like",
+  "settings.connectivity.heading": "Test the connection",
+  "settings.connectivity.hint":
+    "Makes one connection with the saved API key and endpoint.",
+  "settings.connectivity.fixFirst": "Fix the endpoint settings above first.",
   "settings.connectivity.test": "Test connectivity",
   "settings.connectivity.testing": "Testing…",
-  "settings.connectivity.ok": "✓ Connected",
+  "settings.connectivity.ok": "Connected",
   "settings.backup.heading": "Backup & restore",
   "settings.backup.hint":
     "Writes every character — persona, long-term memories and stored conversations — plus your settings and API key into one file you can carry to another device: restore it there and the app is ready to talk, custom voices included, since those live in your DashScope account.",

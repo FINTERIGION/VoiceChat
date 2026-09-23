@@ -6,10 +6,12 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use crate::app::state::AppState;
+use crate::avatar::{self, generate::ImageClient};
 use crate::i18n::{self, Lang};
 use crate::llm::flash::FlashClient;
 use crate::secrets::{self, SecretStatus};
 use crate::store::{backup, character, db, memory, message};
+use crate::subtitle;
 use crate::voice::{self, service::VoiceService};
 
 #[derive(Serialize, Deserialize, Default)]
@@ -126,7 +128,10 @@ pub fn get_vad_settings(state: State<AppState>) -> Result<VadSettings, String> {
         .map_err(|e| e.to_string())?
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(crate::realtime::session::DEFAULT_VAD_SILENCE_MS as i64);
-    Ok(VadSettings { threshold, silence_ms })
+    Ok(VadSettings {
+        threshold,
+        silence_ms,
+    })
 }
 
 #[tauri::command]
@@ -248,6 +253,42 @@ pub fn set_hotkey(
     apply_hotkey(&app, &state, accelerator)
 }
 
+// ---- Desktop subtitle ----
+
+#[tauri::command]
+pub fn get_subtitle_settings(
+    state: State<AppState>,
+) -> Result<subtitle::SubtitleSettings, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    subtitle::get_settings(&conn).map_err(|e| e.to_string())
+}
+
+/// `async` isn't a style choice here: `WebviewWindowBuilder::build` (inside
+/// `subtitle::open`) deadlocks on Windows when called from a synchronous
+/// command — see the builder's own docs — so this has to run off whatever
+/// thread commands normally execute on.
+#[tauri::command]
+pub async fn set_subtitle_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: subtitle::SubtitleSettings,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        subtitle::set_settings(&conn, settings).map_err(|e| e.to_string())?;
+    }
+    if settings.enabled {
+        subtitle::open(&app)
+    } else {
+        subtitle::close(&app)
+    }
+}
+
+#[tauri::command]
+pub fn set_subtitle_adjusting(app: AppHandle, on: bool) -> Result<(), String> {
+    subtitle::set_adjusting(&app, on)
+}
+
 #[tauri::command]
 pub fn interrupt(state: State<AppState>) {
     state.session.interrupt();
@@ -339,9 +380,10 @@ pub fn rename_conversation(
         .ok_or_else(|| crate::tr!("Conversation not found", "会话不存在").to_string())
 }
 
-/// Ends the conversation the live session is writing to (named and
-/// summarized into memory same as any other end) and starts a fresh one for
-/// the same character. A no-op if nothing is currently being recorded.
+/// Ends the conversation the live session is writing to (named, and
+/// summarized into memory if it counts toward it, same as any other end) and
+/// starts a fresh one for the same character. A no-op before any connection
+/// has opened one.
 #[tauri::command]
 pub fn new_conversation(state: State<AppState>) {
     state.session.new_conversation();
@@ -372,11 +414,43 @@ pub fn list_characters(state: State<AppState>) -> Result<Vec<character::Characte
     character::list(&conn).map_err(|e| e.to_string())
 }
 
+/// A picture the character form hands back is only kept if it names one
+/// that is actually stored here. Anything else — a file removed from under
+/// the app, a name restored by an older build that didn't carry pictures —
+/// becomes "no avatar", rather than an error that would stop the user from
+/// saving the rest of their edits.
+fn existing_avatar(state: &AppState, avatar_path: Option<String>) -> Option<String> {
+    avatar_path.filter(|name| avatar::exists(&state.avatars_dir, name))
+}
+
+/// Whether anything the live session was built from changed — everything
+/// but the picture, which the model never sees.
+fn affects_session(before: &character::Character, after: &character::Character) -> bool {
+    before.name != after.name
+        || before.language != after.language
+        || before.persona != after.persona
+        || before.speech_habits != after.speech_habits
+        || before.voice_kind != after.voice_kind
+        || before.voice_id != after.voice_id
+        || before.voice_prompt != after.voice_prompt
+        || before.memory_enabled != after.memory_enabled
+        || before.max_history_turns != after.max_history_turns
+}
+
+/// Deletes the picture `before` had, if `after` no longer uses it.
+fn release_old_avatar(state: &AppState, before: Option<&str>, after: Option<&str>) {
+    if let Some(old) = before.filter(|old| Some(*old) != after) {
+        avatar::remove(&state.avatars_dir, old);
+    }
+}
+
 #[tauri::command]
 pub fn create_character(
     state: State<AppState>,
-    input: character::CharacterInput,
+    mut input: character::CharacterInput,
 ) -> Result<character::Character, String> {
+    input.name = character::check_name(&input.name)?;
+    input.avatar_path = existing_avatar(&state, input.avatar_path.take());
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     character::create(&conn, input).map_err(|e| e.to_string())
 }
@@ -385,25 +459,64 @@ pub fn create_character(
 pub fn update_character(
     state: State<AppState>,
     id: String,
-    input: character::CharacterInput,
+    mut input: character::CharacterInput,
 ) -> Result<character::Character, String> {
+    input.name = character::check_name(&input.name)?;
+    input.avatar_path = existing_avatar(&state, input.avatar_path.take());
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let not_found = || crate::tr!("Character not found", "角色不存在").to_string();
+    let before = character::get(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(not_found)?;
     let updated = character::update(&conn, &id, input)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| crate::tr!("Character not found", "角色不存在").to_string())?;
+        .ok_or_else(not_found)?;
+    release_old_avatar(
+        &state,
+        before.avatar_path.as_deref(),
+        updated.avatar_path.as_deref(),
+    );
 
     // `voice`/`instructions` only take effect on a connection's first
     // `session.update`, so if we just edited the character that's currently
     // live, the running WS won't pick up the change (new language, persona,
-    // voice, etc.) until something else reconnects it. Force that now.
+    // voice, etc.) until something else reconnects it. Force that now —
+    // unless nothing it uses changed: a reconnect ends the conversation and
+    // clears the Chat tab's transcript, far too much to pay for a new
+    // picture.
     let is_current = db::get_setting(&conn, "current_character_id")
         .map_err(|e| e.to_string())?
         .as_deref()
         == Some(id.as_str());
-    if is_current {
+    if is_current && affects_session(&before, &updated) {
         state.session.switch_character(id);
     }
 
+    Ok(updated)
+}
+
+/// Changes only a character's picture, straight from the Characters tab.
+/// `None` removes it.
+#[tauri::command]
+pub fn set_character_avatar(
+    state: State<AppState>,
+    id: String,
+    avatar_path: Option<String>,
+) -> Result<character::Character, String> {
+    let avatar_path = existing_avatar(&state, avatar_path);
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let not_found = || crate::tr!("Character not found", "角色不存在").to_string();
+    let before = character::get(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(not_found)?;
+    let updated = character::set_avatar(&conn, &id, avatar_path.as_deref())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(not_found)?;
+    release_old_avatar(
+        &state,
+        before.avatar_path.as_deref(),
+        updated.avatar_path.as_deref(),
+    );
     Ok(updated)
 }
 
@@ -411,7 +524,13 @@ pub fn update_character(
 pub fn delete_character(state: State<AppState>, id: String) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let current = db::get_setting(&conn, "current_character_id").map_err(|e| e.to_string())?;
+    let picture = character::get(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .and_then(|c| c.avatar_path);
     character::delete(&conn, &id).map_err(|e| e.to_string())?;
+    if let Some(picture) = picture {
+        avatar::remove(&state.avatars_dir, &picture);
+    }
 
     if current.as_deref() == Some(id.as_str()) {
         let remaining = character::list(&conn).map_err(|e| e.to_string())?;
@@ -489,6 +608,48 @@ pub async fn polish_persona(
             })
         }
     }
+}
+
+// ---- Avatars ----
+
+/// Stores a picture the editor has cropped (a `data:` URL) and returns the
+/// name to put in the character's `avatar_path`. Nothing points at it until
+/// the character is saved; one that never is gets swept at the next launch.
+#[tauri::command]
+pub fn save_avatar(state: State<AppState>, data_url: String) -> Result<String, String> {
+    let bytes = avatar::decode_data_url(&data_url)?;
+    avatar::save(&state.avatars_dir, &bytes)
+}
+
+/// Draws a picture for `prompt` with Qwen-Image and returns it as a `data:`
+/// URL, uncropped and unsaved — the editor puts it through the same crop as
+/// a picture the user picked themselves, and saves it from there.
+#[tauri::command]
+pub async fn generate_avatar(
+    state: State<'_, AppState>,
+    prompt: String,
+) -> Result<String, String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err(crate::tr!(
+            "Describe what the avatar should look like first",
+            "请先描述头像的样子",
+        )
+        .into());
+    }
+    let api_key = secrets::get_api_key()
+        .ok_or_else(|| crate::tr!("No API key configured yet", "尚未配置 API key"))?;
+    let (workspace_id, region) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        (
+            db::get_setting(&conn, "workspace_id").map_err(|e| e.to_string())?,
+            db::get_setting(&conn, "region").map_err(|e| e.to_string())?,
+        )
+    };
+    let (bytes, format) = ImageClient::new(api_key, workspace_id, region.as_deref())
+        .generate(prompt)
+        .await?;
+    Ok(avatar::to_data_url(&bytes, format))
 }
 
 // ---- Voices ----
@@ -690,10 +851,11 @@ pub async fn export_backup(
     // is up for as long as the user browses for a folder, and the live
     // session needs the database in the meantime — so the lock must not be
     // held across that await.
-    let payload = {
+    let mut payload = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         backup::export(&conn, api_key).map_err(|e| e.to_string())?
     };
+    payload.embed_avatars(&state.avatars_dir);
     let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -789,7 +951,7 @@ pub async fn import_backup(
             format!("无法读取 {}：{e}", path.display()),
         )
     })?;
-    let parsed: backup::Backup = serde_json::from_str(&raw).map_err(|e| {
+    let mut parsed: backup::Backup = serde_json::from_str(&raw).map_err(|e| {
         crate::tr!(
             format!("This file isn't a readable VoiceChat backup: {e}"),
             format!("无法读取该 VoiceChat 备份文件：{e}"),
@@ -797,6 +959,10 @@ pub async fn import_backup(
     })?;
     parsed.check_compatible()?;
     parsed.validate()?;
+    // Written before the database transaction rather than inside it: a file
+    // can't be rolled back, but one the import then fails to reference is
+    // just an orphan for the next launch's sweep.
+    parsed.unpack_avatars(&state.avatars_dir)?;
 
     let mut summary = {
         let mut conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -872,7 +1038,9 @@ pub async fn import_backup(
             format!(
                 "Your characters and settings were restored, but the API key in the file couldn't be saved to the credential store, so enter it above by hand: {e}"
             ),
-            format!("角色与设置已恢复，但备份中的 API key 无法写入系统凭据管理器，请在上方手动填写：{e}"),
+            format!(
+                "角色与设置已恢复，但备份中的 API key 无法写入系统凭据管理器，请在上方手动填写：{e}"
+            ),
         ));
     }
     Ok(Some(summary))

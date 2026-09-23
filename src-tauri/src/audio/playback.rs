@@ -1,13 +1,14 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc as std_mpsc;
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _};
 
-use super::resample::{pcm16le_to_f32, Resampler};
+use super::resample::{Resampler, pcm16le_to_f32};
 use super::ring;
 
 const SOURCE_HZ: u32 = 24_000;
@@ -22,6 +23,10 @@ const PRIMING_MS: u64 = 250;
 // space while backpressured (see `PlaybackMsg::Append` handling) — not
 // latency-critical since this thread isn't the realtime audio callback.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+// How often the message-processing thread checks whether an `on_drained`
+// caller's audio has finished playing, while one is waiting. Only paces
+// UI (the subtitle fading out), so it can be coarse.
+const DRAINED_POLL_INTERVAL: Duration = Duration::from_millis(50);
 // Ceiling on audio waiting to be played, as bytes of 24 kHz mono PCM16.
 //
 // The queue drains at the speed sound comes out of the speakers, so however
@@ -48,8 +53,12 @@ enum PlaybackMsg {
     Append(Vec<u8>, u64),
     /// Immediately silences and drops any buffered audio (barge-in).
     Clear,
+    /// See `PlaybackHandle::on_drained`.
+    OnDrained(DrainedFn),
     Shutdown,
 }
+
+type DrainedFn = Box<dyn FnOnce() + Send>;
 
 pub struct PlaybackHandle {
     tx: std_mpsc::Sender<PlaybackMsg>,
@@ -90,7 +99,11 @@ impl PlaybackHandle {
         }
         self.queued_bytes.fetch_add(len, Ordering::Release);
         let current_gen = self.clear_gen.load(Ordering::Acquire);
-        if self.tx.send(PlaybackMsg::Append(pcm24k_bytes, current_gen)).is_err() {
+        if self
+            .tx
+            .send(PlaybackMsg::Append(pcm24k_bytes, current_gen))
+            .is_err()
+        {
             // The playback thread is gone, so nothing will ever subtract
             // this back off; undo it here or the counter ratchets up and
             // starts rejecting against a queue that no longer exists.
@@ -108,6 +121,22 @@ impl PlaybackHandle {
         self.clear_gen.fetch_add(1, Ordering::Release);
         let _ = self.tx.send(PlaybackMsg::Clear);
     }
+
+    /// Calls `f`, on the playback thread, once everything appended before
+    /// this has actually come out of the speakers (or been cut by `clear()`).
+    /// Audio appended afterwards doesn't hold it up.
+    ///
+    /// The server finishes sending a reply well before it finishes playing —
+    /// for a long one, by many seconds — so this, not `response.done`, is
+    /// when the character has actually stopped talking.
+    pub fn on_drained(&self, f: impl FnOnce() + Send + 'static) {
+        if let Err(std_mpsc::SendError(PlaybackMsg::OnDrained(f))) =
+            self.tx.send(PlaybackMsg::OnDrained(Box::new(f)))
+        {
+            // The playback thread is gone, so nothing is left to play.
+            f();
+        }
+    }
 }
 
 impl Drop for PlaybackHandle {
@@ -121,7 +150,9 @@ impl Drop for PlaybackHandle {
 
 pub fn start() -> Result<PlaybackHandle, String> {
     let host = cpal::default_host();
-    let device = host.default_output_device().ok_or_else(|| crate::tr!("No speaker device found", "未找到扬声器设备"))?;
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| crate::tr!("No speaker device found", "未找到扬声器设备"))?;
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let sample_format = supported.sample_format();
     let stream_config: cpal::StreamConfig = supported.into();
@@ -134,6 +165,12 @@ pub fn start() -> Result<PlaybackHandle, String> {
     let clear_gen_handle = clear_gen.clone();
     let queued_bytes = Arc::new(AtomicUsize::new(0));
     let queued_bytes_thread = queued_bytes.clone();
+    // Frames (mono, at the device rate) the output callback has taken off
+    // the ring buffer, whether it played them or dropped them for a
+    // `clear()`. Compared against how many the message thread has put on it
+    // to tell when `on_drained` callers' audio is through.
+    let played_frames = Arc::new(AtomicU64::new(0));
+    let played_frames_cb = played_frames.clone();
 
     let thread = thread::Builder::new()
         .name("voicechat-playback".into())
@@ -168,6 +205,7 @@ pub fn start() -> Result<PlaybackHandle, String> {
                                 priming_frames,
                                 &mut mono_scratch,
                                 &mut underrun_since,
+                                &played_frames_cb,
                             );
                         },
                         err_fn,
@@ -191,6 +229,7 @@ pub fn start() -> Result<PlaybackHandle, String> {
                                 priming_frames,
                                 &mut mono_scratch,
                                 &mut underrun_since,
+                                &played_frames_cb,
                             );
                             for (o, s) in output.iter_mut().zip(scratch.iter()) {
                                 *o = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
@@ -221,10 +260,23 @@ pub fn start() -> Result<PlaybackHandle, String> {
             let chunk_size = ((SOURCE_HZ as u64 * CHUNK_MS as u64) / 1000).max(1) as usize;
             let mut resampler = Resampler::new(SOURCE_HZ, device_hz, chunk_size);
             let mut leftover: Vec<f32> = Vec::new();
+            // Frames put on the ring buffer so far — the counterpart to
+            // `played_frames`.
+            let mut pushed_frames: u64 = 0;
+            // `on_drained` callbacks, each with the `pushed_frames` it waits
+            // for `played_frames` to reach. Queued in order, so the targets
+            // only ever go up.
+            let mut waiting: VecDeque<(u64, DrainedFn)> = VecDeque::new();
 
-            while let Ok(msg) = rx.recv() {
+            loop {
+                fire_drained(&mut waiting, &played_frames);
+                let msg = if waiting.is_empty() {
+                    rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                } else {
+                    rx.recv_timeout(DRAINED_POLL_INTERVAL)
+                };
                 match msg {
-                    PlaybackMsg::Append(bytes, msg_gen) => {
+                    Ok(PlaybackMsg::Append(bytes, msg_gen)) => {
                         // Off the backlog the moment it is in hand, ahead of
                         // the staleness check below: a skipped chunk is just
                         // as much no longer queued as a played one, and
@@ -256,26 +308,39 @@ pub fn start() -> Result<PlaybackHandle, String> {
                             let mut remaining = out;
                             while !remaining.is_empty() {
                                 let written = prod.push_slice(remaining);
+                                pushed_frames += written as u64;
                                 remaining = &remaining[written..];
                                 if remaining.is_empty()
                                     || clear_gen.load(Ordering::Acquire) != msg_gen
                                 {
                                     break;
                                 }
+                                // The previous reply's audio is what's
+                                // draining to make room — its callers
+                                // shouldn't wait on this one's backlog too.
+                                fire_drained(&mut waiting, &played_frames);
                                 thread::sleep(DRAIN_POLL_INTERVAL);
                             }
                             offset += need;
                         }
                         leftover.drain(0..offset);
                     }
-                    PlaybackMsg::Clear => {
+                    Ok(PlaybackMsg::Clear) => {
                         leftover.clear();
                     }
-                    PlaybackMsg::Shutdown => break,
+                    Ok(PlaybackMsg::OnDrained(f)) => {
+                        waiting.push_back((pushed_frames, f));
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Ok(PlaybackMsg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
 
             drop(stream);
+            // Whatever they were waiting on will never play now.
+            for (_, f) in waiting {
+                f();
+            }
         })
         .map_err(|e| e.to_string())?;
 
@@ -285,6 +350,17 @@ pub fn start() -> Result<PlaybackHandle, String> {
         clear_gen: clear_gen_handle,
         thread: Some(thread),
     })
+}
+
+/// Runs every `on_drained` callback whose audio has all been taken off the
+/// ring buffer.
+fn fire_drained(waiting: &mut VecDeque<(u64, DrainedFn)>, played_frames: &AtomicU64) {
+    let played = played_frames.load(Ordering::Acquire);
+    while waiting.front().is_some_and(|(target, _)| *target <= played) {
+        if let Some((_, f)) = waiting.pop_front() {
+            f();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -298,11 +374,15 @@ fn fill_output(
     priming_frames: usize,
     mono_scratch: &mut Vec<f32>,
     underrun_since: &mut Option<Instant>,
+    played_frames: &AtomicU64,
 ) {
     let current_gen = clear_gen.load(Ordering::Acquire);
     if current_gen != *last_clear_gen {
         *last_clear_gen = current_gen;
-        cons.clear();
+        // Counted as played: cut short is still over, as far as anyone
+        // waiting on `on_drained` is concerned.
+        let dropped = cons.clear();
+        played_frames.fetch_add(dropped as u64, Ordering::Release);
         *primed = false;
         *underrun_since = None;
         output.fill(0.0);
@@ -341,6 +421,7 @@ fn fill_output(
     // explicit `Clear` (barge-in), above.
     if channels <= 1 {
         let n = cons.pop_slice(output);
+        played_frames.fetch_add(n as u64, Ordering::Release);
         if n < output.len() {
             output[n..].fill(0.0);
         }
@@ -351,6 +432,7 @@ fn fill_output(
         let frames = output.len() / channels;
         mono_scratch.resize(frames, 0.0);
         let n = cons.pop_slice(mono_scratch);
+        played_frames.fetch_add(n as u64, Ordering::Release);
         for i in 0..frames {
             let v = if i < n { mono_scratch[i] } else { 0.0 };
             for c in 0..channels {

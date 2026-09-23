@@ -1,5 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Brain,
+  KeyRound,
+  Mic,
+  MicOff,
+} from "lucide-react";
+import Avatar from "../components/Avatar";
+import CharacterSwitcher from "../components/CharacterSwitcher";
 import ConversationList from "../components/ConversationList";
+import { formatHotkey } from "../lib/format";
 import { useT, type MessageKey } from "../lib/i18n";
 import {
   ipc,
@@ -13,6 +24,7 @@ import {
   subscribe,
 } from "../lib/ipc";
 import type {
+  Character,
   ChatMessage,
   ChatStateEvent,
   ConversationSummary,
@@ -23,7 +35,16 @@ interface Bubble {
   role: "user" | "assistant";
   text: string;
   key: number;
+  /** A user turn that has been heard but not transcribed yet. */
+  pending?: boolean;
 }
+
+/**
+ * How close to the bottom (in px) still counts as "at the bottom" — so a
+ * reader who scrolled up to reread something isn't yanked back down by
+ * every new line, while one a few pixels off still follows along.
+ */
+const STICK_THRESHOLD_PX = 48;
 
 const STATE_LABEL: Record<ChatStateEvent["state"], MessageKey> = {
   idle: "chat.state.idle",
@@ -43,8 +64,26 @@ const STATE_COLOR: Record<ChatStateEvent["state"], string> = {
   error: "bg-red-500",
 };
 
-export default function Chat() {
+const ONBOARDING_STEPS = [
+  "onboarding.step1",
+  "onboarding.step2",
+  "onboarding.step3",
+] as const satisfies readonly MessageKey[];
+
+export default function Chat({
+  active,
+  onOpenSettings,
+  onOpenCharacters,
+}: {
+  active: boolean;
+  /** The first-run prompt's way to the API key field. */
+  onOpenSettings: () => void;
+  /** The character menu's "Manage characters…". */
+  onOpenCharacters: () => void;
+}) {
   const t = useT();
+  const scroller = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
   const [state, setState] = useState<ChatStateEvent>({ state: "idle" });
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [level, setLevel] = useState(0);
@@ -54,9 +93,28 @@ export default function Chat() {
   // choice to offer, so the toggle is not rendered at all.
   const [recording, setRecording] = useState<boolean | null>(null);
   const [hotkey, setHotkey] = useState<string | null>(null);
+  // `undefined` until first read, so the header doesn't flash "no
+  // character" while the name is on its way.
+  const [character, setCharacter] = useState<Character | null | undefined>(
+    undefined,
+  );
+  const characterName = character?.name;
+  // Whom the live session was talking to before the latest switch, when that
+  // conversation had anything in it — it went into their history, which is
+  // no longer the one on screen, so the transcript says where it went.
+  const [endedWith, setEndedWith] = useState<string | null>(null);
+  // Mirrors of state the subscriptions below read. They're registered once,
+  // at mount, so the values they close over would never change.
+  const characterRef = useRef<Character | null | undefined>(undefined);
+  const hadTurns = useRef(false);
+  // `null` until first read. Only a definite "no key" shows the first-run
+  // prompt — not the moment before the answer comes back.
+  const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(
+    null,
+  );
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  // The conversation the live session is writing to, `null` when it isn't
-  // recording one (the character has memory off, or nothing is connected).
+  // The conversation the live session is writing to, `null` while nothing is
+  // connected.
   const [activeId, setActiveId] = useState<string | null>(null);
   // The past conversation being reviewed, `null` while the live transcript
   // is on screen. Its messages are held separately from `bubbles` so a turn
@@ -89,12 +147,31 @@ export default function Chat() {
       .catch(() => setConversations([]));
   }, []);
 
+  // Call after `refreshConversations`, which is what points the ref at `id`.
+  const loadCharacter = useCallback((id: string | null) => {
+    if (!id) {
+      setCharacter(null);
+      return;
+    }
+    ipc
+      .listCharacters()
+      .then((list) => {
+        // Another switch may have landed while this was in flight.
+        if (characterIdRef.current !== id) return;
+        setCharacter(list.find((c) => c.id === id) ?? null);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    characterRef.current = character;
+  }, [character]);
+
   useEffect(() => {
     // Covers remounting this tab (switching tabs unmounts it, see App.tsx)
     // while the mic was already open via the global hotkey — after this,
     // `chat:mic` keeps it in sync with hotkey presses made from anywhere.
     ipc.getMicOpen().then(setMicOpen);
-    ipc.getHotkey().then(setHotkey);
     // Set once whatever the replay below is fetching stops being what
     // belongs on screen — this tab unmounting, or the live session moving to
     // another character.
@@ -130,7 +207,10 @@ export default function Chat() {
       // end; the replay belongs in front of them.
       setBubbles((prev) => [...restored, ...prev]);
     });
-    ipc.getCurrentCharacterId().then(refreshConversations);
+    ipc.getCurrentCharacterId().then((id) => {
+      refreshConversations(id);
+      loadCharacter(id);
+    });
 
     // Drops user bubbles still waiting on a transcription that can no longer
     // arrive, and empties the pending queue with them. Without this, a turn
@@ -156,6 +236,14 @@ export default function Chat() {
           // too, and a replay still in flight belongs to the character being
           // left behind.
           restoreStale = true;
+          // The same id is an edit to the live character reconnecting it,
+          // not a switch: its conversation is still in the list on screen.
+          const previous = characterRef.current;
+          setEndedWith(
+            previous && previous.id !== id && hadTurns.current
+              ? previous.name
+              : null,
+          );
           pendingUserKeys.current = [];
           assistantKey.current = null;
           setBubbles([]);
@@ -163,6 +251,7 @@ export default function Chat() {
           setReviewBubbles([]);
           setReviewError(null);
           refreshConversations(id);
+          loadCharacter(id);
         }),
       ),
       subscribe(() =>
@@ -215,14 +304,17 @@ export default function Chat() {
               // follows once transcription completes.
               const key = nextKey.current++;
               pendingUserKeys.current.push(key);
-              return [...prev, { role: "user", text: ev.text, key }];
+              return [
+                ...prev,
+                { role: "user", text: ev.text, key, pending: true },
+              ];
             }
             const pendingKey = pendingUserKeys.current.shift();
             if (pendingKey !== undefined) {
               const idx = prev.findIndex((b) => b.key === pendingKey);
               if (idx !== -1) {
                 const next = [...prev];
-                next[idx] = { ...next[idx], text: ev.text };
+                next[idx] = { ...next[idx], text: ev.text, pending: false };
                 return next;
               }
             }
@@ -238,7 +330,7 @@ export default function Chat() {
       restoreStale = true;
       cleanups.forEach((cleanup) => cleanup());
     };
-  }, [refreshConversations]);
+  }, [refreshConversations, loadCharacter]);
 
   // A conversation deleted or renamed elsewhere in the list must not leave a
   // stale header on the review pane.
@@ -265,6 +357,7 @@ export default function Chat() {
     pendingUserKeys.current = [];
     assistantKey.current = null;
     setBubbles([]);
+    setEndedWith(null);
     ipc.newConversation();
   }
 
@@ -308,8 +401,51 @@ export default function Chat() {
     setRecording(!recording);
   }
 
+  // The hotkey, the API key and the character's name can all change on
+  // other tabs while this one stays mounted in the background, and nothing
+  // announces any of them — so they're re-read each time the tab comes back.
+  useEffect(() => {
+    if (!active) return;
+    ipc.getHotkey().then(setHotkey);
+    ipc
+      .getSecretStatus()
+      .then((s) => setApiKeyConfigured(s.configured))
+      .catch(() => {});
+    if (characterIdRef.current) loadCharacter(characterIdRef.current);
+  }, [active, loadCharacter]);
+
+  const needsKey = apiKeyConfigured === false;
+
   const levelPct = Math.min(1, level * 4) * 100;
   const shown = reviewing ? reviewBubbles : bubbles;
+
+  useEffect(() => {
+    hadTurns.current = bubbles.some((b) => b.text !== "");
+  }, [bubbles]);
+
+  function handleScroll() {
+    const el = scroller.current;
+    if (!el) return;
+    stickToBottom.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD_PX;
+  }
+
+  // Opening a different transcript — a past one, or back to the live one —
+  // starts at its latest line, wherever the last one was left.
+  useLayoutEffect(() => {
+    stickToBottom.current = true;
+  }, [reviewing?.id]);
+
+  // Follows the conversation as it grows (a new bubble, or the reply
+  // streaming into the last one), unless the reader has scrolled up. Also
+  // re-run when the tab comes back into view: while hidden the list has no
+  // layout to scroll, so anything that arrived meanwhile is caught up here.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el && active && stickToBottom.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [shown, active]);
 
   return (
     <div className="flex h-full text-neutral-100">
@@ -327,34 +463,56 @@ export default function Chat() {
           {reviewing ? (
             <>
               <div className="min-w-0">
-                <p className="truncate text-sm text-neutral-300">
+                <p className="truncate text-sm font-medium text-neutral-100">
                   {reviewing.title || reviewing.preview}
                 </p>
-                <p className="text-xs text-neutral-500">
+                <p className="mt-0.5 truncate text-xs text-neutral-500">
+                  {characterName ? `${characterName} · ` : ""}
                   {t("history.viewing")}
                 </p>
               </div>
               <button
                 onClick={() => openConversation(null)}
-                className={`${btn.outline} shrink-0 px-3 py-1.5 text-xs`}
+                className={`${btn.outline} shrink-0 gap-1.5 px-3 py-1.5 text-xs`}
               >
+                <ArrowLeft className="size-3.5" />
                 {t("history.backToLive")}
               </button>
             </>
           ) : (
             <>
-              <div className="flex items-center gap-2">
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${STATE_COLOR[state.state]}`}
-                />
-                <span className="text-sm text-neutral-300">
-                  {t(STATE_LABEL[state.state])}
-                </span>
-                {state.state === "error" && state.message && (
-                  <span className="truncate text-xs text-red-400">
-                    {state.message}
-                  </span>
+              <div className="flex min-w-0 items-center gap-3">
+                {character && (
+                  <Avatar
+                    id={character.id}
+                    name={character.name}
+                    avatarPath={character.avatar_path}
+                    size="md"
+                  />
                 )}
+                <div className="min-w-0">
+                  <CharacterSwitcher
+                    current={character}
+                    onManage={onOpenCharacters}
+                  />
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                    <span
+                      className={`size-2 shrink-0 rounded-full ${STATE_COLOR[state.state]}`}
+                    />
+                    <span className="shrink-0 text-xs text-neutral-400">
+                      {t(STATE_LABEL[state.state])}
+                    </span>
+                    {state.state === "error" && state.message && (
+                      // Clipped to fit the header; the whole message is on hover.
+                      <span
+                        title={state.message}
+                        className="line-clamp-2 min-w-0 text-xs break-words text-red-400"
+                      >
+                        {state.message}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
               {recording !== null && (
                 <button
@@ -362,12 +520,13 @@ export default function Chat() {
                   title={t(
                     recording ? "chat.memory.onTitle" : "chat.memory.offTitle",
                   )}
-                  className={`${btnBase} rounded-full px-2.5 py-1 text-xs ${
+                  className={`${btnBase} shrink-0 gap-1 rounded-full px-2.5 py-1 text-xs ${
                     recording
                       ? "bg-neutral-800 text-neutral-300 hover:bg-neutral-700 hover:text-neutral-100"
                       : "bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 hover:text-amber-300"
                   }`}
                 >
+                  <Brain className="size-3.5" />
                   {t(recording ? "chat.memory.on" : "chat.memory.off")}
                 </button>
               )}
@@ -375,25 +534,85 @@ export default function Chat() {
           )}
         </header>
 
-        <div className="flex-1 space-y-3 overflow-y-auto">
+        <div
+          ref={scroller}
+          onScroll={handleScroll}
+          className="flex-1 space-y-3 overflow-y-auto"
+        >
           {reviewError && (
             <p role="alert" className="text-sm text-red-400">
               {t("history.loadFailed")}
             </p>
           )}
-          {!reviewing && shown.length === 0 && (
-            <p className="text-sm text-neutral-500">
-              {hotkey ? t("chat.emptyWithHotkey", { hotkey }) : t("chat.empty")}
+          {!reviewing && needsKey && (
+            <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-5">
+              <div className="flex items-center gap-2.5">
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400">
+                  <KeyRound className="size-4" />
+                </span>
+                <h2 className="text-base font-semibold">
+                  {t("onboarding.title")}
+                </h2>
+              </div>
+              <p className="mt-3 text-sm leading-relaxed text-neutral-400">
+                {t("onboarding.body")}
+              </p>
+              <ol className="mt-4 space-y-2">
+                {ONBOARDING_STEPS.map((key, i) => (
+                  <li
+                    key={key}
+                    className="flex items-start gap-2.5 text-sm text-neutral-300"
+                  >
+                    <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs text-neutral-400">
+                      {i + 1}
+                    </span>
+                    {t(key)}
+                  </li>
+                ))}
+              </ol>
+              <button
+                onClick={onOpenSettings}
+                className={`${btn.primary} mt-5 gap-1.5 px-4 py-2 text-sm font-medium`}
+              >
+                {t("onboarding.cta")}
+                <ArrowRight className="size-4" />
+              </button>
+            </section>
+          )}
+          {!reviewing && endedWith && (
+            <p className="flex items-center gap-3 text-xs text-neutral-500 before:h-px before:flex-1 before:bg-neutral-800 after:h-px after:flex-1 after:bg-neutral-800">
+              {t("chat.switchedNotice", { name: endedWith })}
             </p>
           )}
-          {shown.map((b) =>
-            b.role === "user" && b.text === "" ? null : (
+          {!reviewing && !needsKey && shown.length === 0 && (
+            <p className="text-sm text-neutral-500">
+              {hotkey
+                ? t("chat.emptyWithHotkey", { hotkey: formatHotkey(hotkey) })
+                : t("chat.empty")}
+            </p>
+          )}
+          {shown.map((b) => {
+            // Heard but not yet transcribed: a quiet stand-in keeps the turn
+            // visible in its place, so speaking doesn't look like it went
+            // nowhere while the words are on their way.
+            if (b.pending && b.text === "") {
+              return (
+                <div key={b.key} className="flex justify-end">
+                  <div className="animate-pulse rounded-2xl border border-dashed border-neutral-700 px-4 py-2 text-sm text-neutral-500">
+                    {t("chat.transcribing")}
+                  </div>
+                </div>
+              );
+            }
+            // A turn transcribed as nothing at all (a cough, a door).
+            if (b.role === "user" && b.text === "") return null;
+            return (
               <div
                 key={b.key}
                 className={`flex ${b.role === "user" ? "justify-end" : "justify-start"}`}
               >
                 <div
-                  className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
+                  className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm whitespace-pre-wrap break-words ${
                     b.role === "user"
                       ? "bg-neutral-100 text-neutral-900"
                       : "bg-neutral-800 text-neutral-100"
@@ -402,8 +621,8 @@ export default function Chat() {
                   {b.text}
                 </div>
               </div>
-            ),
-          )}
+            );
+          })}
         </div>
 
         <div className="space-y-3 pt-4">
@@ -415,12 +634,17 @@ export default function Chat() {
           </div>
           <button
             onClick={handleMicToggle}
-            className={`${btnBase} ${hoverGlow} w-full rounded-xl py-3 text-sm font-medium ${
+            // Opening the mic without a key can only end in an error; the
+            // prompt above says what to do instead. Closing always works.
+            disabled={needsKey && !micOpen}
+            title={needsKey && !micOpen ? t("chat.needApiKey") : undefined}
+            className={`${btnBase} ${hoverGlow} w-full gap-2 rounded-xl py-3 text-sm font-medium ${
               micOpen
-                ? "bg-emerald-500 text-neutral-950 hover:bg-emerald-400 hover:shadow-emerald-500/25"
-                : "bg-neutral-800 text-neutral-100 hover:bg-neutral-700 hover:shadow-black/40"
+                ? "bg-emerald-500 text-neutral-950 not-disabled:hover:bg-emerald-400 not-disabled:hover:shadow-emerald-500/25"
+                : "bg-neutral-800 text-neutral-100 not-disabled:hover:bg-neutral-700 not-disabled:hover:shadow-black/40"
             }`}
           >
+            {micOpen ? <MicOff className="size-4" /> : <Mic className="size-4" />}
             {t(micOpen ? "chat.micOn" : "chat.micOff")}
           </button>
         </div>

@@ -76,8 +76,31 @@ export const btn = {
   quiet: `${BASE} text-neutral-500 not-disabled:hover:text-neutral-200`,
 };
 
-/** A whole list row that is itself the button — a voice preset, say. */
-export const cardBtn = `${interactive} block w-full rounded-xl border border-neutral-800 bg-neutral-950 text-left ${hoverLift} not-disabled:hover:border-neutral-700 not-disabled:hover:bg-neutral-900 not-disabled:hover:shadow-black/40 not-disabled:active:scale-[0.995]`;
+/**
+ * A whole list row that is itself the button — a voice preset, say. `current`
+ * marks the one already in use, the same green edge a current character
+ * card wears; it stays put rather than lifting, since picking it again
+ * changes nothing.
+ */
+export function cardBtn(current = false) {
+  return current
+    ? `${interactive} block w-full rounded-xl border border-emerald-500/60 bg-neutral-900 text-left shadow-lg shadow-emerald-500/5`
+    : `${interactive} block w-full rounded-xl border border-neutral-800 bg-neutral-950 text-left ${hoverLift} not-disabled:hover:border-neutral-700 not-disabled:hover:bg-neutral-900 not-disabled:hover:shadow-black/40 not-disabled:active:scale-[0.995]`;
+}
+
+/**
+ * Text fields, text areas and selects. Unlike buttons, every field in the
+ * app is the same size, so the padding and type size come with the style
+ * and a call site adds only its width. Selects also get a chevron from
+ * index.css in place of the platform's own arrow.
+ */
+const FIELD_BASE =
+  "rounded-lg border border-neutral-700 bg-neutral-900 text-neutral-100 outline-none transition-colors duration-200 placeholder:text-neutral-500 not-disabled:hover:border-neutral-600 focus:border-neutral-400 focus:ring-2 focus:ring-neutral-500/25 disabled:cursor-not-allowed disabled:opacity-40";
+
+export const field = `${FIELD_BASE} px-3 py-2 text-sm`;
+
+/** The same, shrunk to sit inside a list row — renaming a conversation. */
+export const fieldCompact = `${FIELD_BASE} px-1.5 py-px text-sm`;
 
 /** Tab strips sit on a border, so they slide colour rather than lift. */
 export function tabBtn(active: boolean) {

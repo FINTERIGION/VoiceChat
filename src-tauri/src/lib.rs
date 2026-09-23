@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod avatar;
 mod dashscope;
 mod i18n;
 mod llm;
@@ -8,14 +9,13 @@ mod prompt;
 mod realtime;
 mod secrets;
 mod store;
+mod subtitle;
 mod voice;
 
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
-use tauri_plugin_global_shortcut::{
-    GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState,
-};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 
 use app::state::AppState;
 
@@ -68,7 +68,9 @@ fn seed_default_character(conn: &rusqlite::Connection) -> Result<(), Box<dyn std
 /// this doesn't only run on a brand-new database, since existing users
 /// should get the new preset too. Matched by name so re-running on every
 /// launch doesn't create duplicates.
-fn seed_english_coach_character(conn: &rusqlite::Connection) -> Result<(), Box<dyn std::error::Error>> {
+fn seed_english_coach_character(
+    conn: &rusqlite::Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
     let already_exists = store::character::list(conn)?
         .iter()
         .any(|c| c.name == "Emma");
@@ -103,12 +105,19 @@ fn seed_english_coach_character(conn: &rusqlite::Connection) -> Result<(), Box<d
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     tauri::Builder::default()
+        // Character pictures, as `<img src>` for the webview — see `avatar`.
+        .register_uri_scheme_protocol("avatar", |ctx, request| {
+            let state = ctx.app_handle().try_state::<AppState>();
+            avatar::serve(
+                state.as_ref().map(|s| s.avatars_dir.as_path()),
+                request.uri().path(),
+            )
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
@@ -125,9 +134,24 @@ pub fn run() {
                 Ok(n) => tracing::info!("closed {n} conversation(s) left open by a previous run"),
                 Err(e) => tracing::error!("failed to close dangling conversations: {e}"),
             }
+            // No window exists yet, so no editor can be holding a picture it
+            // hasn't saved: whatever no character points at is an orphan.
+            let avatars_dir = app_dir.join(avatar::DIR_NAME);
+            std::fs::create_dir_all(&avatars_dir)?;
+            let in_use = store::character::list(&conn)?
+                .into_iter()
+                .filter_map(|c| c.avatar_path)
+                .collect();
+            match avatar::sweep(&avatars_dir, &in_use) {
+                0 => {}
+                n => tracing::info!("removed {n} avatar(s) no character uses"),
+            }
             // `None` (key never set) means "use the default"; `Some("")`
             // means the user explicitly disabled the hotkey in Settings.
             let hotkey_setting = store::db::get_setting(&conn, "hotkey")?;
+            // Read here rather than after `conn` is moved into `AppState`
+            // below — `subtitle::open` re-locks it fresh once that's done.
+            let subtitle_settings = subtitle::get_settings(&conn)?;
 
             // Applied before anything can fail below, so even a startup
             // error surfaces in the language the user picked.
@@ -141,6 +165,7 @@ pub fn run() {
                 db: Mutex::new(conn),
                 session,
                 recorder: Mutex::new(None),
+                avatars_dir,
             });
 
             let hotkey = match hotkey_setting {
@@ -151,6 +176,12 @@ pub fn run() {
             if let Some(accel) = hotkey {
                 if let Err(e) = install_hotkey(app.handle(), &accel) {
                     tracing::error!("failed to register hotkey {accel:?}: {e}");
+                }
+            }
+
+            if subtitle_settings.enabled {
+                if let Err(e) = subtitle::open(app.handle()) {
+                    tracing::error!("failed to open subtitle window: {e}");
                 }
             }
 
@@ -174,6 +205,9 @@ pub fn run() {
             app::commands::get_mic_open,
             app::commands::get_hotkey,
             app::commands::set_hotkey,
+            app::commands::get_subtitle_settings,
+            app::commands::set_subtitle_settings,
+            app::commands::set_subtitle_adjusting,
             app::commands::interrupt,
             app::commands::set_recording,
             app::commands::list_memories,
@@ -192,6 +226,9 @@ pub fn run() {
             app::commands::delete_character,
             app::commands::get_current_character_id,
             app::commands::switch_character,
+            app::commands::set_character_avatar,
+            app::commands::save_avatar,
+            app::commands::generate_avatar,
             app::commands::polish_persona,
             app::commands::list_preset_voices,
             app::commands::start_recording,

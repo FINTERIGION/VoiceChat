@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -35,17 +35,6 @@ pub fn list(conn: &Connection, character_id: &str) -> rusqlite::Result<Vec<Memor
     rows.collect()
 }
 
-/// Highest-salience memories first (ties broken by recency), for injection
-/// into `instructions`.
-pub fn top_k(conn: &Connection, character_id: &str, k: usize) -> rusqlite::Result<Vec<Memory>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM memories WHERE character_id = ?1 \
-         ORDER BY salience DESC, updated_at DESC LIMIT ?2"
-    ))?;
-    let rows = stmt.query_map(params![character_id, k as i64], row_to_memory)?;
-    rows.collect()
-}
-
 pub fn create(
     conn: &Connection,
     character_id: &str,
@@ -70,7 +59,11 @@ pub fn create(
     })
 }
 
-pub fn update_content(conn: &Connection, id: &str, content: &str) -> rusqlite::Result<Option<Memory>> {
+pub fn update_content(
+    conn: &Connection,
+    id: &str,
+    content: &str,
+) -> rusqlite::Result<Option<Memory>> {
     let now = Utc::now().to_rfc3339();
     let affected = conn.execute(
         "UPDATE memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
@@ -107,9 +100,34 @@ pub fn delete_many(conn: &mut Connection, ids: &[String]) -> rusqlite::Result<()
     tx.commit()
 }
 
+/// One current set of unfinished threads per character. Each summarize
+/// replaces the whole set: a thread the latest conversation resolved has
+/// to disappear, and an old one the model kept has to stay as a fresh row.
+pub fn replace_open_loops(
+    conn: &Connection,
+    character_id: &str,
+    loops: &[String],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM memories WHERE character_id = ?1 AND kind = 'open_loop'",
+        params![character_id],
+    )?;
+    for content in loops.iter().filter(|s| !s.trim().is_empty()).take(3) {
+        let clipped: String = content.trim().chars().take(40).collect();
+        // Above a fact (0.5), below the summary (1.0), so a thread survives
+        // the injection cap ahead of older trivia.
+        create(conn, character_id, "open_loop", &clipped, 0.9)?;
+    }
+    Ok(())
+}
+
 /// The rolling summary is a single row per character: replace, don't
 /// accumulate.
-pub fn replace_summary(conn: &Connection, character_id: &str, content: &str) -> rusqlite::Result<()> {
+pub fn replace_summary(
+    conn: &Connection,
+    character_id: &str,
+    content: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM memories WHERE character_id = ?1 AND kind = 'summary'",
         params![character_id],

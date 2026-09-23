@@ -1,7 +1,15 @@
 import ReactDOM from "react-dom/client";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
+import Subtitle from "./routes/Subtitle";
 import { I18nProvider } from "./lib/i18n";
 import "./index.css";
+
+// The subtitle window loads the same `index.html` as the main one (see
+// `subtitle::open` on the Rust side) — there is no separate build target —
+// so which UI renders is decided here, by the window's own label, rather
+// than by two entry points.
+const isSubtitleWindow = getCurrentWindow().label === "subtitle";
 
 // No React.StrictMode: its dev-only double-invoke of effects races Tauri's
 // async listen()/unlisten() (see subscribe() in lib/ipc.ts) and was causing
@@ -9,7 +17,5 @@ import "./index.css";
 // never happens in a production build anyway, so this only affects dev-mode
 // fidelity, not the shipped app's correctness.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <I18nProvider>
-    <App />
-  </I18nProvider>,
+  <I18nProvider>{isSubtitleWindow ? <Subtitle /> : <App />}</I18nProvider>,
 );

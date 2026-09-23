@@ -46,6 +46,13 @@ pub enum ClientEvent {
     InputAudioBufferCommit {},
     #[serde(rename = "response.cancel")]
     ResponseCancel {},
+    /// Asks the server to speak while nobody has talked yet. Allowed in
+    /// server-VAD mode only when no response is already generating. The
+    /// words come from `instructions` — this event cannot carry its own
+    /// prompt without overriding the session one — so it is sent only when
+    /// those instructions already contain the one-sentence open-loop line.
+    #[serde(rename = "response.create")]
+    ResponseCreate {},
     /// Payload shape is undocumented upstream; memory injection deliberately
     /// avoids this event (see prompt::builder) and goes through `instructions`
     /// instead, so nothing constructs this variant yet.

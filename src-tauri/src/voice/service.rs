@@ -110,15 +110,23 @@ impl VoiceService {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {}", crate::dashscope::snippet(&text)));
+            return Err(format!(
+                "HTTP {status}: {}",
+                crate::dashscope::snippet(&text)
+            ));
         }
-        let parsed: EnrollmentResponse =
-            serde_json::from_str(&text).map_err(|e| {
-                crate::tr!(
-                    format!("Could not parse the response: {e}; raw: {}", crate::dashscope::snippet(&text)),
-                    format!("解析响应失败: {e}; 原始: {}", crate::dashscope::snippet(&text)),
-                )
-            })?;
+        let parsed: EnrollmentResponse = serde_json::from_str(&text).map_err(|e| {
+            crate::tr!(
+                format!(
+                    "Could not parse the response: {e}; raw: {}",
+                    crate::dashscope::snippet(&text)
+                ),
+                format!(
+                    "解析响应失败: {e}; 原始: {}",
+                    crate::dashscope::snippet(&text)
+                ),
+            )
+        })?;
         Ok(parsed.output)
     }
 
@@ -144,7 +152,9 @@ impl VoiceService {
                 }
             }))
             .await?;
-        output.voice_id.ok_or_else(|| crate::tr!("The response had no voice_id", "响应中缺少 voice_id").to_string())
+        output.voice_id.ok_or_else(|| {
+            crate::tr!("The response had no voice_id", "响应中缺少 voice_id").to_string()
+        })
     }
 
     /// Step 1 of the text-design bridge: describe a voice in words and get a
@@ -177,11 +187,7 @@ impl VoiceService {
             .and_then(|p| p.data)
             .filter(|d| !d.is_empty())
             .ok_or_else(|| {
-                crate::tr!(
-                    "The response had no preview audio",
-                    "响应中缺少试听音频",
-                )
-                .to_string()
+                crate::tr!("The response had no preview audio", "响应中缺少试听音频",).to_string()
             })?;
         Ok(DesignedVoicePreview {
             tts_voice: output.voice,

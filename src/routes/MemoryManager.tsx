@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, Check, Pencil, Trash2, X } from "lucide-react";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { useT, type MessageKey } from "../lib/i18n";
+import { formatDateTime } from "../lib/format";
+import { useI18n, type MessageKey } from "../lib/i18n";
 import { ipc } from "../lib/ipc";
-import { btn, interactive } from "../lib/ui";
+import { btn, field, interactive } from "../lib/ui";
 import type { Memory } from "../lib/types";
 
 const KIND_LABEL: Record<Memory["kind"], MessageKey> = {
   summary: "memory.kind.summary",
   fact: "memory.kind.fact",
   profile: "memory.kind.profile",
+  open_loop: "memory.kind.openLoop",
 };
 
 export default function MemoryManager({
@@ -20,8 +23,9 @@ export default function MemoryManager({
   characterName: string;
   onBack: () => void;
 }) {
-  const t = useT();
+  const { t, lang } = useI18n();
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -33,15 +37,21 @@ export default function MemoryManager({
 
   async function refresh() {
     setLoading(true);
-    const rows = await ipc.listMemories(characterId);
-    setMemories(rows);
-    // Rows that are gone cannot stay ticked, and this is the only place they
-    // leave the selection — a delete just refreshes and lets the prune run.
-    setSelected((prev) => {
-      const alive = new Set(rows.map((m) => m.id));
-      return new Set([...prev].filter((id) => alive.has(id)));
-    });
-    setLoading(false);
+    try {
+      const rows = await ipc.listMemories(characterId);
+      setMemories(rows);
+      // Rows that are gone cannot stay ticked, and this is the only place
+      // they leave the selection — a delete just refreshes and lets the
+      // prune run.
+      setSelected((prev) => {
+        const alive = new Set(rows.map((m) => m.id));
+        return new Set([...prev].filter((id) => alive.has(id)));
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -69,7 +79,14 @@ export default function MemoryManager({
   }
 
   async function saveEdit(id: string) {
-    await ipc.updateMemory(id, draft);
+    setError(null);
+    try {
+      await ipc.updateMemory(id, draft);
+    } catch (e) {
+      // The editor stays open with the draft in it, so nothing typed is lost.
+      setError(String(e));
+      return;
+    }
     setEditingId(null);
     await refresh();
   }
@@ -77,33 +94,46 @@ export default function MemoryManager({
   async function handleConfirmed() {
     if (!pending) return;
     setWorking(true);
+    setError(null);
     try {
       if (pending === "selected") {
         await ipc.deleteMemories([...selected]);
       } else {
         await ipc.deleteMemory(pending.id);
       }
-      setPending(null);
       await refresh();
+    } catch (e) {
+      setError(String(e));
     } finally {
       setWorking(false);
+      setPending(null);
     }
   }
 
   return (
     <div className="mx-auto max-w-2xl space-y-4 p-6 text-neutral-100">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">
-            {t("memory.title", { name: characterName })}
-          </h1>
-          <p className="text-sm text-neutral-500">
-            {t("memory.count", { count: memories.length })}
-            {selected.size > 0 &&
-              ` · ${t("memory.selected", { count: selected.size })}`}
-          </p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            onClick={onBack}
+            title={t("common.back")}
+            aria-label={t("common.back")}
+            className={`${btn.quiet} -ml-2 size-8 shrink-0`}
+          >
+            <ArrowLeft className="size-5" />
+          </button>
+          <div className="min-w-0">
+            <h1 className="truncate text-xl font-semibold">
+              {t("memory.title", { name: characterName })}
+            </h1>
+            <p className="text-sm text-neutral-500">
+              {t("memory.count", { count: memories.length })}
+              {selected.size > 0 &&
+                ` · ${t("memory.selected", { count: selected.size })}`}
+            </p>
+          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex shrink-0 gap-2">
           <button
             onClick={toggleAll}
             disabled={memories.length === 0}
@@ -114,15 +144,22 @@ export default function MemoryManager({
           <button
             onClick={() => setPending("selected")}
             disabled={selected.size === 0}
-            className={`${btn.dangerOutline} px-3 py-1.5 text-sm`}
+            className={`${btn.dangerOutline} gap-1.5 px-3 py-1.5 text-sm`}
           >
+            <Trash2 className="size-4" />
             {t("memory.deleteSelected")}
-          </button>
-          <button onClick={onBack} className={`${btn.quiet} px-2 py-1 text-sm`}>
-            {t("common.back")}
           </button>
         </div>
       </div>
+
+      {error && (
+        <p
+          role="alert"
+          className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400"
+        >
+          {error}
+        </p>
+      )}
 
       {loading ? (
         <p className="text-sm text-neutral-500">{t("common.loading")}</p>
@@ -156,9 +193,21 @@ export default function MemoryManager({
               }`}
             >
               <div className="mb-2 flex items-center justify-between">
-                <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">
-                  {t(KIND_LABEL[m.kind])}
-                </span>
+                <div className="flex items-center gap-2.5">
+                  {/* Shows the card's tick state; the card itself is the
+                      control, so this box takes no clicks or focus. */}
+                  <input
+                    type="checkbox"
+                    checked={selected.has(m.id)}
+                    readOnly
+                    tabIndex={-1}
+                    aria-hidden
+                    className="pointer-events-none"
+                  />
+                  <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">
+                    {t(KIND_LABEL[m.kind])}
+                  </span>
+                </div>
                 {editingId === m.id ? (
                   <div
                     onClick={(e) => e.stopPropagation()}
@@ -166,14 +215,16 @@ export default function MemoryManager({
                   >
                     <button
                       onClick={() => saveEdit(m.id)}
-                      className={`${btn.accentGhost} px-2 py-1 text-xs`}
+                      className={`${btn.accentGhost} gap-1 px-2 py-1 text-xs`}
                     >
+                      <Check className="size-3.5" />
                       {t("common.save")}
                     </button>
                     <button
                       onClick={() => setEditingId(null)}
-                      className={`${btn.ghost} px-2 py-1 text-xs`}
+                      className={`${btn.ghost} gap-1 px-2 py-1 text-xs`}
                     >
+                      <X className="size-3.5" />
                       {t("common.cancel")}
                     </button>
                   </div>
@@ -186,14 +237,16 @@ export default function MemoryManager({
                   >
                     <button
                       onClick={() => startEdit(m)}
-                      className={`${btn.ghost} px-2 py-1 text-xs`}
+                      className={`${btn.ghost} gap-1 px-2 py-1 text-xs`}
                     >
+                      <Pencil className="size-3.5" />
                       {t("common.edit")}
                     </button>
                     <button
                       onClick={() => setPending(m)}
-                      className={`${btn.dangerGhost} px-2 py-1 text-xs`}
+                      className={`${btn.dangerGhost} gap-1 px-2 py-1 text-xs`}
                     >
+                      <Trash2 className="size-3.5" />
                       {t("common.delete")}
                     </button>
                   </div>
@@ -202,15 +255,29 @@ export default function MemoryManager({
               {editingId === m.id ? (
                 <textarea
                   value={draft}
+                  autoFocus
                   onChange={(e) => setDraft(e.target.value)}
                   onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      saveEdit(m.id);
+                    } else if (e.key === "Escape") {
+                      setEditingId(null);
+                    }
+                  }}
                   rows={3}
-                  className="w-full resize-none rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-500"
+                  aria-label={t(KIND_LABEL[m.kind])}
+                  className={`${field} w-full resize-y`}
                 />
               ) : (
-                <p className="text-sm text-neutral-200">{m.content}</p>
+                <p className="text-sm whitespace-pre-wrap break-words text-neutral-200">
+                  {m.content}
+                </p>
               )}
-              <p className="mt-1 text-xs text-neutral-600">{m.updated_at}</p>
+              <p className="mt-1 text-xs text-neutral-500">
+                {formatDateTime(m.updated_at, lang)}
+              </p>
             </div>
           ))}
         </div>

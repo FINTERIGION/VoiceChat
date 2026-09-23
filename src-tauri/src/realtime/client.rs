@@ -1,10 +1,10 @@
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use super::events::ClientEvent;
 
@@ -33,5 +33,7 @@ pub async fn connect(url: &str, api_key: &str) -> Result<(WsSink, WsSource), Str
 
 pub async fn send_event(sink: &mut WsSink, event: &ClientEvent) -> Result<(), String> {
     let text = serde_json::to_string(event).map_err(|e| e.to_string())?;
-    sink.send(Message::text(text)).await.map_err(|e| e.to_string())
+    sink.send(Message::text(text))
+        .await
+        .map_err(|e| e.to_string())
 }

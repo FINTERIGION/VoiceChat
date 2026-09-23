@@ -19,7 +19,9 @@ pub struct RecorderHandle {
 
 pub fn start() -> Result<RecorderHandle, String> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or_else(|| crate::tr!("No microphone device found", "未找到麦克风设备"))?;
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| crate::tr!("No microphone device found", "未找到麦克风设备"))?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let sample_format = supported.sample_format();
     let stream_config: cpal::StreamConfig = supported.into();
@@ -39,9 +41,12 @@ pub fn start() -> Result<RecorderHandle, String> {
                 cpal::SampleFormat::F32 => device.build_input_stream(
                     stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        push_capped(&buffer_cb, max_samples, data.iter().map(|&s| {
-                            (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-                        }));
+                        push_capped(
+                            &buffer_cb,
+                            max_samples,
+                            data.iter()
+                                .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16),
+                        );
                     },
                     err_fn,
                     None,
@@ -60,7 +65,8 @@ pub fn start() -> Result<RecorderHandle, String> {
                         push_capped(
                             &buffer_cb,
                             max_samples,
-                            data.iter().map(|&s| (s as i32 - i16::MAX as i32 - 1) as i16),
+                            data.iter()
+                                .map(|&s| (s as i32 - i16::MAX as i32 - 1) as i16),
                         );
                     },
                     err_fn,

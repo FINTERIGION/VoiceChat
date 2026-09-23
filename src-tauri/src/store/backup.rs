@@ -18,11 +18,18 @@
 //! Cloned and designed voices aren't in here: those live in the DashScope
 //! account, so a character keeps its own voice on the new machine as long as
 //! the same key is configured there — which, now, the backup does itself.
+//!
+//! Avatars are, as base64 inside each character (`avatar_data`): they are
+//! files on this device (see `crate::avatar`), and a file name alone would
+//! point at nothing on the next one.
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use std::path::Path;
+
+use crate::avatar;
 use crate::store::{character, db, memory};
 
 /// Stamped into every file and checked on the way back in, so picking the
@@ -63,6 +70,8 @@ mod limits {
     pub const NAME_CHARS: usize = 200;
     pub const TITLE_CHARS: usize = 200;
     pub const PATH_CHARS: usize = 4_096;
+    /// An avatar at the largest size `avatar::save` accepts, base64-encoded.
+    pub const AVATAR_DATA_CHARS: usize = (crate::avatar::MAX_BYTES / 3 + 1) * 4;
     pub const VOICE_ID_CHARS: usize = 200;
     /// Covers `persona`, `speech_habits`, `voice_prompt` and memory content.
     pub const PROSE_CHARS: usize = 20_000;
@@ -89,7 +98,7 @@ mod limits {
 /// would drive this app somewhere its own UI cannot.
 const LANGUAGES: &[&str] = &["zh", "ja", "en", "auto"];
 const VOICE_KINDS: &[&str] = &["preset", "designed", "cloned"];
-const MEMORY_KINDS: &[&str] = &["profile", "fact", "summary"];
+const MEMORY_KINDS: &[&str] = &["profile", "fact", "summary", "open_loop"];
 const MESSAGE_ROLES: &[&str] = &["user", "assistant"];
 
 /// The tags `i18n::Lang::from_tag` recognises. It falls back to English for
@@ -139,11 +148,38 @@ fn one_of(value: &str, allowed: &[&str], field: &str) -> Check {
     )))
 }
 
+/// Decodes the picture up front so `Backup::unpack_avatars` can't fail on
+/// the file's contents half way through writing them out.
+fn check_avatar(data: &str) -> Check {
+    if data.len() > limits::AVATAR_DATA_CHARS {
+        return Err(reject(crate::tr!(
+            "an avatar is larger than allowed".to_string(),
+            "其中的头像超出了大小上限".to_string(),
+        )));
+    }
+    let is_image = avatar::decode(data)
+        .ok()
+        .is_some_and(|bytes| avatar::Format::sniff(&bytes).is_some());
+    if !is_image {
+        return Err(reject(crate::tr!(
+            "an avatar isn't a PNG, JPEG or WebP image".to_string(),
+            "其中的头像不是 PNG、JPEG 或 WebP 图片".to_string(),
+        )));
+    }
+    Ok(())
+}
+
 fn at_most<T>(items: &[T], max: usize, field: &str) -> Check {
     if items.len() > max {
         return Err(reject(crate::tr!(
-            format!("it holds {} {field}, more than the {max} allowed", items.len()),
-            format!("其中的 {field} 有 {} 个，超过了允许的 {max} 个", items.len()),
+            format!(
+                "it holds {} {field}, more than the {max} allowed",
+                items.len()
+            ),
+            format!(
+                "其中的 {field} 有 {} 个，超过了允许的 {max} 个",
+                items.len()
+            ),
         )));
     }
     Ok(())
@@ -209,6 +245,12 @@ pub struct BackupCharacter {
     pub name: String,
     #[serde(default)]
     pub avatar_path: Option<String>,
+    /// The picture `avatar_path` names, base64-encoded. Absent in files
+    /// written before avatars existed, and for a character without one; an
+    /// older build reading a newer file ignores it and keeps a name that
+    /// points at nothing, which the UI shows as no avatar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_data: Option<String>,
     pub language: String,
     pub persona: String,
     pub speech_habits: String,
@@ -245,8 +287,30 @@ pub struct BackupConversation {
     pub started_at: String,
     #[serde(default)]
     pub ended_at: Option<String>,
+    /// Whether it was summarized into the character's long-term memory.
+    /// Absent from files written before conversations could be kept without
+    /// being remembered; see `BackupConversation::is_memorized`.
+    #[serde(default)]
+    pub memorized: Option<bool>,
     #[serde(default)]
     pub messages: Vec<BackupMessage>,
+}
+
+impl BackupConversation {
+    /// The file's own answer if it has one. Otherwise the file predates the
+    /// field, from a build that only stored a conversation while recording it
+    /// into memory and summarized each one as it ended — so the same rule as
+    /// migration 0004: ended, and not by the dangling-row sweep, which stamps
+    /// `ended_at` with the last message's time and never summarizes.
+    fn is_memorized(&self) -> bool {
+        self.memorized.unwrap_or_else(|| {
+            let last_message = self.messages.iter().map(|m| m.created_at.as_str()).max();
+            match (self.ended_at.as_deref(), last_message) {
+                (Some(ended), Some(last)) => ended != last,
+                _ => false,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -285,6 +349,38 @@ impl Backup {
                 .map(|v| v.messages.len())
                 .sum(),
         }
+    }
+
+    /// Puts each character's picture into the file, read from `dir`. Kept
+    /// apart from `export`, which only reads the database.
+    pub fn embed_avatars(&mut self, dir: &Path) {
+        for c in &mut self.characters {
+            c.avatar_data = c
+                .avatar_path
+                .as_deref()
+                .and_then(|name| avatar::read(dir, name))
+                .map(|(bytes, _)| avatar::encode(&bytes));
+        }
+    }
+
+    /// Writes the pictures the file carries into `dir` and points each
+    /// character at its copy there, ready for `import`. Call after
+    /// `validate`, which is what vouches for the pictures being images.
+    ///
+    /// A character the file has no picture for keeps its `avatar_path` only
+    /// when this device has that file — restoring onto the machine the
+    /// backup came from — and otherwise ends up without one.
+    pub fn unpack_avatars(&mut self, dir: &Path) -> Result<(), String> {
+        for c in &mut self.characters {
+            c.avatar_path = match c.avatar_data.take() {
+                Some(data) => Some(avatar::save(dir, &avatar::decode(&data)?)?),
+                None => c
+                    .avatar_path
+                    .take()
+                    .filter(|name| avatar::exists(dir, name)),
+            };
+        }
+        Ok(())
     }
 
     /// Rejects a file this build can't be trusted to restore, before any of
@@ -333,12 +429,39 @@ impl Backup {
             one_of(&c.language, LANGUAGES, "a character's language")?;
             one_of(&c.voice_kind, VOICE_KINDS, "a character's voice_kind")?;
             text(&c.persona, limits::PROSE_CHARS, "a character's persona")?;
-            text(&c.speech_habits, limits::PROSE_CHARS, "a character's speech_habits")?;
-            text(c.voice_id.as_deref().unwrap_or(""), limits::VOICE_ID_CHARS, "a voice_id")?;
-            text(c.voice_prompt.as_deref().unwrap_or(""), limits::PROSE_CHARS, "a voice_prompt")?;
-            text(c.avatar_path.as_deref().unwrap_or(""), limits::PATH_CHARS, "an avatar_path")?;
-            text(&c.created_at, limits::TIMESTAMP_CHARS, "a character's created_at")?;
-            text(&c.updated_at, limits::TIMESTAMP_CHARS, "a character's updated_at")?;
+            text(
+                &c.speech_habits,
+                limits::PROSE_CHARS,
+                "a character's speech_habits",
+            )?;
+            text(
+                c.voice_id.as_deref().unwrap_or(""),
+                limits::VOICE_ID_CHARS,
+                "a voice_id",
+            )?;
+            text(
+                c.voice_prompt.as_deref().unwrap_or(""),
+                limits::PROSE_CHARS,
+                "a voice_prompt",
+            )?;
+            text(
+                c.avatar_path.as_deref().unwrap_or(""),
+                limits::PATH_CHARS,
+                "an avatar_path",
+            )?;
+            if let Some(data) = &c.avatar_data {
+                check_avatar(data)?;
+            }
+            text(
+                &c.created_at,
+                limits::TIMESTAMP_CHARS,
+                "a character's created_at",
+            )?;
+            text(
+                &c.updated_at,
+                limits::TIMESTAMP_CHARS,
+                "a character's updated_at",
+            )?;
 
             // Sent to the API as the session's history window, so an absurd
             // value is a request this app would never make on its own.
@@ -362,7 +485,11 @@ impl Backup {
                 required(&m.id, limits::ID_CHARS, "a memory id")?;
                 one_of(&m.kind, MEMORY_KINDS, "a memory's kind")?;
                 text(&m.content, limits::PROSE_CHARS, "a memory's content")?;
-                text(&m.updated_at, limits::TIMESTAMP_CHARS, "a memory's updated_at")?;
+                text(
+                    &m.updated_at,
+                    limits::TIMESTAMP_CHARS,
+                    "a memory's updated_at",
+                )?;
                 // Orders which memories get injected into the instructions.
                 // NaN would make that ordering meaningless rather than merely
                 // wrong, so it is ruled out along with out-of-range values.
@@ -374,19 +501,39 @@ impl Backup {
                 }
             }
 
-            at_most(&c.conversations, limits::CONVERSATIONS_PER_CHARACTER, "conversations")?;
+            at_most(
+                &c.conversations,
+                limits::CONVERSATIONS_PER_CHARACTER,
+                "conversations",
+            )?;
             for v in &c.conversations {
                 required(&v.id, limits::ID_CHARS, "a conversation id")?;
-                text(v.title.as_deref().unwrap_or(""), limits::TITLE_CHARS, "a conversation title")?;
-                text(&v.started_at, limits::TIMESTAMP_CHARS, "a conversation's started_at")?;
-                text(v.ended_at.as_deref().unwrap_or(""), limits::TIMESTAMP_CHARS, "a conversation's ended_at")?;
+                text(
+                    v.title.as_deref().unwrap_or(""),
+                    limits::TITLE_CHARS,
+                    "a conversation title",
+                )?;
+                text(
+                    &v.started_at,
+                    limits::TIMESTAMP_CHARS,
+                    "a conversation's started_at",
+                )?;
+                text(
+                    v.ended_at.as_deref().unwrap_or(""),
+                    limits::TIMESTAMP_CHARS,
+                    "a conversation's ended_at",
+                )?;
 
                 at_most(&v.messages, limits::MESSAGES_PER_CONVERSATION, "messages")?;
                 for msg in &v.messages {
                     required(&msg.id, limits::ID_CHARS, "a message id")?;
                     one_of(&msg.role, MESSAGE_ROLES, "a message's role")?;
                     text(&msg.text, limits::MESSAGE_CHARS, "a message's text")?;
-                    text(&msg.created_at, limits::TIMESTAMP_CHARS, "a message's created_at")?;
+                    text(
+                        &msg.created_at,
+                        limits::TIMESTAMP_CHARS,
+                        "a message's created_at",
+                    )?;
                 }
             }
         }
@@ -487,7 +634,7 @@ fn export_conversations(
     character_id: &str,
 ) -> rusqlite::Result<Vec<BackupConversation>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, started_at, ended_at FROM conversations c \
+        "SELECT id, title, started_at, ended_at, memorized FROM conversations c \
          WHERE c.character_id = ?1 \
          AND EXISTS (SELECT 1 FROM messages WHERE conversation_id = c.id) \
          ORDER BY c.started_at ASC",
@@ -498,6 +645,7 @@ fn export_conversations(
             title: row.get("title")?,
             started_at: row.get("started_at")?,
             ended_at: row.get("ended_at")?,
+            memorized: Some(row.get("memorized")?),
             messages: Vec::new(),
         })
     })?;
@@ -550,6 +698,7 @@ pub fn export(conn: &Connection, api_key: Option<String>) -> rusqlite::Result<Ba
             id: c.id,
             name: c.name,
             avatar_path: c.avatar_path,
+            avatar_data: None,
             language: c.language,
             persona: c.persona,
             speech_habits: c.speech_habits,
@@ -675,14 +824,15 @@ pub fn import(conn: &mut Connection, backup: &Backup) -> rusqlite::Result<Import
 
         for v in &c.conversations {
             tx.execute(
-                "INSERT INTO conversations (id, character_id, started_at, ended_at, title)
-                 VALUES (?1,?2,?3,?4,?5)
+                "INSERT INTO conversations (id, character_id, started_at, ended_at, title, memorized)
+                 VALUES (?1,?2,?3,?4,?5,?6)
                  ON CONFLICT(id) DO UPDATE SET
                     character_id = excluded.character_id,
                     started_at = excluded.started_at,
                     ended_at = excluded.ended_at,
-                    title = excluded.title",
-                params![v.id, c.id, v.started_at, v.ended_at, v.title],
+                    title = excluded.title,
+                    memorized = excluded.memorized",
+                params![v.id, c.id, v.started_at, v.ended_at, v.title, v.is_memorized()],
             )?;
 
             for msg in &v.messages {
@@ -768,6 +918,23 @@ mod tests {
         }
     }
 
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("voicechat-backup-avatars-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn seed(conn: &Connection) -> String {
         let c = character::create(
             conn,
@@ -782,6 +949,7 @@ mod tests {
         message::insert_message(conn, &conversation.id, "assistant", "hi there").expect("message");
         message::set_title(conn, &conversation.id, "First chat").expect("title");
         message::end_conversation(conn, &conversation.id).expect("end");
+        message::mark_memorized(conn, &conversation.id).expect("memorized");
 
         // An empty conversation, of the kind every connect opens: it must
         // not travel with the backup.
@@ -829,6 +997,10 @@ mod tests {
             message::list_conversations(&target.conn, &character_id).expect("conversations");
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].title.as_deref(), Some("First chat"));
+        assert!(
+            conversations[0].memorized,
+            "the history list's memory mark travels with the conversation"
+        );
         let messages =
             message::list_messages(&target.conn, &conversations[0].id).expect("messages");
         assert_eq!(
@@ -894,6 +1066,37 @@ mod tests {
         );
     }
 
+    /// A file from before `memorized` existed still gets its marks right: a
+    /// conversation that ended properly was summarized on the way out, one
+    /// the dangling-row sweep closed was not.
+    #[test]
+    fn legacy_files_infer_the_memory_mark() {
+        let conversation = |ended_at: Option<&str>| BackupConversation {
+            id: "v1".into(),
+            title: None,
+            started_at: "2026-01-01T10:00:00+00:00".into(),
+            ended_at: ended_at.map(Into::into),
+            memorized: None,
+            messages: vec![BackupMessage {
+                id: "msg1".into(),
+                role: "user".into(),
+                text: "hello".into(),
+                audio_ms: None,
+                created_at: "2026-01-01T10:01:00+00:00".into(),
+            }],
+        };
+        assert!(conversation(Some("2026-01-01T10:05:00+00:00")).is_memorized());
+        assert!(
+            !conversation(Some("2026-01-01T10:01:00+00:00")).is_memorized(),
+            "closed by the sweep, never summarized"
+        );
+        assert!(!conversation(None).is_memorized());
+
+        let mut explicit = conversation(Some("2026-01-01T10:01:00+00:00"));
+        explicit.memorized = Some(true);
+        assert!(explicit.is_memorized(), "the file's own answer wins");
+    }
+
     /// The other half of "seamless on the next machine": the settings that
     /// say which account to talk to and how, carried across with everything
     /// else so nothing has to be retyped.
@@ -915,7 +1118,9 @@ mod tests {
         let exported = export(&source.conn, Some("sk-not-a-real-key".into())).expect("export");
         let json = serde_json::to_string(&exported).expect("serialize");
         let parsed: Backup = serde_json::from_str(&json).expect("deserialize");
-        parsed.validate().expect("its own settings must import back");
+        parsed
+            .validate()
+            .expect("its own settings must import back");
         let settings = parsed.settings.as_ref().expect("settings");
         assert_eq!(settings.api_key.as_deref(), Some("sk-not-a-real-key"));
 
@@ -957,7 +1162,9 @@ mod tests {
         let summary = import(&mut db.conn, &v1).expect("import");
         assert!(!summary.settings_restored);
         assert_eq!(
-            db::get_setting(&db.conn, "workspace_id").expect("get").as_deref(),
+            db::get_setting(&db.conn, "workspace_id")
+                .expect("get")
+                .as_deref(),
             Some("llm-mine")
         );
         assert_eq!(
@@ -977,15 +1184,21 @@ mod tests {
         }
 
         assert!(
-            with(|s| s.workspace_id = Some("evil.com/#".into())).validate().is_err(),
+            with(|s| s.workspace_id = Some("evil.com/#".into()))
+                .validate()
+                .is_err(),
             "a workspace id that is really a host"
         );
         assert!(
-            with(|s| s.region = Some("us-east-1".into())).validate().is_err(),
+            with(|s| s.region = Some("us-east-1".into()))
+                .validate()
+                .is_err(),
             "a region this build has no endpoint for"
         );
         assert!(
-            with(|s| s.ui_language = Some("de".into())).validate().is_err(),
+            with(|s| s.ui_language = Some("de".into()))
+                .validate()
+                .is_err(),
             "a display language with no catalogue"
         );
         assert!(
@@ -993,26 +1206,36 @@ mod tests {
             "a blank API key, which would overwrite a working one with nothing"
         );
         assert!(
-            with(|s| s.api_key = Some("k".repeat(limits::API_KEY_CHARS + 1))).validate().is_err(),
+            with(|s| s.api_key = Some("k".repeat(limits::API_KEY_CHARS + 1)))
+                .validate()
+                .is_err(),
             "an API key no keyring should be asked to hold"
         );
 
         for threshold in [f64::NAN, -0.1, 1.5] {
             assert!(
-                with(move |s| s.vad_threshold = Some(threshold)).validate().is_err(),
+                with(move |s| s.vad_threshold = Some(threshold))
+                    .validate()
+                    .is_err(),
                 "threshold {threshold}"
             );
         }
         for ms in [0, limits::MAX_VAD_SILENCE_MS + 1] {
             assert!(
-                with(move |s| s.vad_silence_ms = Some(ms)).validate().is_err(),
+                with(move |s| s.vad_silence_ms = Some(ms))
+                    .validate()
+                    .is_err(),
                 "silence {ms} ms"
             );
         }
 
         // The empty string is not a rejected value in either place: it is how
         // "no workspace", "no region" and "hotkey off" are stored.
-        assert!(with(|s| s.workspace_id = Some(String::new())).validate().is_ok());
+        assert!(
+            with(|s| s.workspace_id = Some(String::new()))
+                .validate()
+                .is_ok()
+        );
         assert!(with(|s| s.region = Some(String::new())).validate().is_ok());
         assert!(with(|s| s.hotkey = Some(String::new())).validate().is_ok());
     }
@@ -1029,6 +1252,7 @@ mod tests {
                 id: "c1".into(),
                 name: "Nia".into(),
                 avatar_path: None,
+                avatar_data: None,
                 language: "auto".into(),
                 persona: "curious and warm".into(),
                 speech_habits: "short sentences".into(),
@@ -1051,6 +1275,7 @@ mod tests {
                     title: Some("First chat".into()),
                     started_at: Utc::now().to_rfc3339(),
                     ended_at: None,
+                    memorized: Some(true),
                     messages: vec![BackupMessage {
                         id: "msg1".into(),
                         role: "user".into(),
@@ -1081,7 +1306,9 @@ mod tests {
         seed(&db.conn);
         let exported = export(&db.conn, Some("sk-not-a-real-key".into())).expect("export");
         exported.check_compatible().expect("compatible");
-        exported.validate().expect("a file this app wrote must import back");
+        exported
+            .validate()
+            .expect("a file this app wrote must import back");
 
         valid_backup().validate().expect("the fixture is valid");
     }
@@ -1119,7 +1346,10 @@ mod tests {
 
         let mut b = valid_backup();
         b.characters = std::iter::repeat_with(|| {
-            let mut c = valid_backup().characters.pop().expect("the fixture has one");
+            let mut c = valid_backup()
+                .characters
+                .pop()
+                .expect("the fixture has one");
             c.id = uuid::Uuid::new_v4().to_string();
             c
         })
@@ -1141,6 +1371,57 @@ mod tests {
             b.characters[0].memories[0].salience = salience;
             assert!(b.validate().is_err(), "salience {salience}");
         }
+    }
+
+    #[test]
+    fn avatars_travel_inside_the_file() {
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+        let from_dir = TempDir::new();
+        let to_dir = TempDir::new();
+
+        let source = TempDb::new();
+        let id = seed(&source.conn);
+        let name = avatar::save(&from_dir.0, PNG).expect("save avatar");
+        character::set_avatar(&source.conn, &id, Some(&name)).expect("set avatar");
+
+        let mut exported = export(&source.conn, None).expect("export");
+        exported.embed_avatars(&from_dir.0);
+        let json = serde_json::to_string(&exported).expect("serialize");
+
+        let mut restored: Backup = serde_json::from_str(&json).expect("parse");
+        restored.validate().expect("valid");
+        restored.unpack_avatars(&to_dir.0).expect("unpack");
+        let mut target = TempDb::new();
+        import(&mut target.conn, &restored).expect("import");
+
+        let landed = character::get(&target.conn, &id)
+            .expect("get")
+            .and_then(|c| c.avatar_path)
+            .expect("the character came with its avatar");
+        assert_eq!(
+            avatar::read(&to_dir.0, &landed).map(|(bytes, _)| bytes),
+            Some(PNG.to_vec())
+        );
+    }
+
+    #[test]
+    fn a_name_without_its_picture_is_dropped() {
+        let dir = TempDir::new();
+        let mut b = valid_backup();
+        b.characters[0].avatar_path = Some("0f8fad5b-d9cb-469f-a165-70867728950e.png".into());
+        b.unpack_avatars(&dir.0).expect("unpack");
+        assert_eq!(b.characters[0].avatar_path, None);
+    }
+
+    #[test]
+    fn rejects_an_avatar_that_isnt_an_image() {
+        let mut b = valid_backup();
+        b.characters[0].avatar_data = Some(avatar::encode(b"<svg onload=alert(1)>"));
+        assert!(b.validate().is_err(), "not an image");
+
+        let mut b = valid_backup();
+        b.characters[0].avatar_data = Some("not base64!".into());
+        assert!(b.validate().is_err(), "not base64");
     }
 
     #[test]

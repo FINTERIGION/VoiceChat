@@ -15,6 +15,9 @@ import type {
   PersonaPolish,
   RegionOption,
   SecretStatus,
+  SubtitleLineEvent,
+  SubtitleSettings,
+  SubtitleTranslationEvent,
   TranscriptEvent,
   VadSettings,
 } from "./types";
@@ -42,6 +45,11 @@ export const ipc = {
   getHotkey: () => invoke<string | null>("get_hotkey"),
   setHotkey: (accelerator: string | null) =>
     invoke<void>("set_hotkey", { accelerator }),
+  getSubtitleSettings: () => invoke<SubtitleSettings>("get_subtitle_settings"),
+  setSubtitleSettings: (settings: SubtitleSettings) =>
+    invoke<void>("set_subtitle_settings", { settings }),
+  setSubtitleAdjusting: (on: boolean) =>
+    invoke<void>("set_subtitle_adjusting", { on }),
   interrupt: () => invoke<void>("interrupt"),
   setRecording: (on: boolean) => invoke<void>("set_recording", { on }),
 
@@ -73,6 +81,17 @@ export const ipc = {
   getCurrentCharacterId: () =>
     invoke<string | null>("get_current_character_id"),
   switchCharacter: (id: string) => invoke<void>("switch_character", { id }),
+  /** Changes the picture alone; unlike `updateCharacter`, never reconnects. */
+  setCharacterAvatar: (id: string, avatarPath: string | null) =>
+    invoke<Character>("set_character_avatar", { id, avatarPath }),
+  /**
+   * Stores a cropped picture (a `data:` URL) and resolves to the name that
+   * goes in `avatar_path`. Unreferenced until a character is saved with it.
+   */
+  saveAvatar: (dataUrl: string) => invoke<string>("save_avatar", { dataUrl }),
+  /** Draws a picture with Qwen-Image; resolves to an uncropped `data:` URL. */
+  generateAvatar: (prompt: string) =>
+    invoke<string>("generate_avatar", { prompt }),
   polishPersona: (description: string) =>
     invoke<PersonaPolish>("polish_persona", { description }),
 
@@ -161,6 +180,36 @@ export function onChatCharacter(
   handler: (characterId: string) => void,
 ): Promise<UnlistenFn> {
   return listen<string>("chat:character", (e) => handler(e.payload));
+}
+
+export function onSubtitleLine(
+  handler: (event: SubtitleLineEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<SubtitleLineEvent>("subtitle:line", (e) => handler(e.payload));
+}
+
+export function onSubtitleTranslation(
+  handler: (event: SubtitleTranslationEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<SubtitleTranslationEvent>("subtitle:translation", (e) =>
+    handler(e.payload),
+  );
+}
+
+/** The subtitle line with this id has finished playing out loud (or was cut
+ * off) — as opposed to `SubtitleLineEvent.done`, which only means its text is
+ * complete, usually well before the audio is. */
+export function onSubtitleSpoken(
+  handler: (id: number) => void,
+): Promise<UnlistenFn> {
+  return listen<number>("subtitle:spoken", (e) => handler(e.payload));
+}
+
+/** Whether the "调整字幕位置" mode (see Settings) is currently on. */
+export function onSubtitleAdjust(
+  handler: (adjusting: boolean) => void,
+): Promise<UnlistenFn> {
+  return listen<boolean>("subtitle:adjust", (e) => handler(e.payload));
 }
 
 /**

@@ -47,6 +47,13 @@ export interface ConversationSummary {
   message_count: number;
   /** The conversation's opening line, as a fallback label. */
   preview: string;
+  /**
+   * Whether it has been summarized into the character's long-term memory.
+   * Every conversation is kept in the history — with memory off, or opted
+   * out of for that one conversation, it just isn't remembered — so this is
+   * what tells the delete dialog whether anything of it outlives deletion.
+   */
+  memorized: boolean;
 }
 
 /** A stored message, as replayed when reviewing a past conversation. */
@@ -113,7 +120,7 @@ export interface ManagedVoice {
   realtime_compatible: boolean;
 }
 
-export type MemoryKind = "profile" | "fact" | "summary";
+export type MemoryKind = "profile" | "fact" | "summary" | "open_loop";
 
 export interface Memory {
   id: string;
@@ -136,6 +143,28 @@ export interface BackupExport {
   /** Where the file was written, as the user picked it. */
   path: string;
   totals: BackupTotals;
+}
+
+export interface SubtitleSettings {
+  enabled: boolean;
+  translate: boolean;
+}
+
+/** A line of the live subtitle, as it streams in — see `chat:transcript`'s
+ * `TranscriptEvent` for the equivalent on the main window's transcript. */
+export interface SubtitleLineEvent {
+  id: number;
+  text: string;
+  done: boolean;
+}
+
+/** One segment (roughly a sentence) of a line's translation. Arrives
+ * separately from, and generally after, the part of the line it translates —
+ * matched up by `id` and placed by `index`, not by arrival order. */
+export interface SubtitleTranslationEvent {
+  id: number;
+  index: number;
+  text: string;
 }
 
 export interface BackupImportSummary {

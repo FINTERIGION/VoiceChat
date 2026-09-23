@@ -17,7 +17,14 @@ fn entry() -> Result<Entry, String> {
 pub fn status() -> SecretStatus {
     match entry().and_then(|e| e.get_password().map_err(|e| e.to_string())) {
         Ok(key) if !key.is_empty() => {
-            let tail: String = key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: String = key
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             SecretStatus {
                 configured: true,
                 tail: Some(format!("...{tail}")),

@@ -1,47 +1,85 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { MessageCircle, Settings as SettingsIcon, Users } from "lucide-react";
+import ConfirmDialog from "./components/ConfirmDialog";
 import { useT } from "./lib/i18n";
 import { tabBtn } from "./lib/ui";
 import CharacterEdit from "./routes/CharacterEdit";
 import CharacterList from "./routes/CharacterList";
 import Chat from "./routes/Chat";
 import MemoryManager from "./routes/MemoryManager";
-import Settings from "./routes/Settings";
+import Settings, { type SettingsSection } from "./routes/Settings";
 
 type Tab = "chat" | "characters" | "settings";
 
-const TAB_LABEL = {
-  chat: "nav.chat",
-  characters: "nav.characters",
-  settings: "nav.settings",
-} as const;
+const TABS = [
+  { id: "chat", label: "nav.chat", icon: MessageCircle },
+  { id: "characters", label: "nav.characters", icon: Users },
+  { id: "settings", label: "nav.settings", icon: SettingsIcon },
+] as const;
 
 function App() {
   const t = useT();
   const [tab, setTab] = useState<Tab>("chat");
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
+  // The character shown in the Characters tab's detail pane. Held here so
+  // the editor and the memory page, which replace the tab while open, hand
+  // back to the same one; `null` lets the tab pick the current character.
+  const [selectedCharacterId, setSelectedCharacterId] = useState<
+    string | null
+  >(null);
   const [viewingMemory, setViewingMemory] = useState<{
     id: string;
     name: string;
   } | null>(null);
+  // Whether the character editor holds unsaved edits. Any tab click leaves
+  // it (the Characters tab itself included, which goes back to the list), so
+  // that is where the question gets asked.
+  const editDirty = useRef(false);
+  const [pendingTab, setPendingTab] = useState<Tab | null>(null);
+  // Held here rather than in Settings, which unmounts with its tab, so
+  // coming back finds the section that was open — and so the Chat tab's
+  // first-run prompt can open Settings straight at the API key.
+  const [settingsSection, setSettingsSection] =
+    useState<SettingsSection>("general");
+  const handleDirtyChange = useCallback((dirty: boolean) => {
+    editDirty.current = dirty;
+  }, []);
 
-  function resetCharactersView() {
+  function closeEditor() {
+    editDirty.current = false;
     setEditingId(null);
+  }
+
+  function goToTab(next: Tab) {
+    setTab(next);
+    closeEditor();
     setViewingMemory(null);
   }
 
+  function handleTabClick(next: Tab) {
+    if (editingId !== null && editDirty.current) {
+      setPendingTab(next);
+      return;
+    }
+    goToTab(next);
+  }
+
   return (
-    <div className="flex h-screen flex-col bg-neutral-950">
+    // `scheme-dark` so the controls the webview draws itself — a select's
+    // drop-down list, the audio player — come out dark too. Set here rather
+    // than on `:root`, where it would also darken the subtitle window's
+    // canvas, which has to stay transparent.
+    <div className="flex h-screen flex-col bg-neutral-950 scheme-dark">
       <nav className="flex gap-1 border-b border-neutral-800 px-4 pt-3">
-        {(["chat", "characters", "settings"] as const).map((tab_) => (
+        {TABS.map(({ id, label, icon: Icon }) => (
           <button
-            key={tab_}
-            onClick={() => {
-              setTab(tab_);
-              resetCharactersView();
-            }}
-            className={tabBtn(tab === tab_)}
+            key={id}
+            onClick={() => handleTabClick(id)}
+            aria-current={tab === id ? "page" : undefined}
+            className={`${tabBtn(tab === id)} gap-1.5`}
           >
-            {t(TAB_LABEL[tab_])}
+            <Icon className="size-4" />
+            {t(label)}
           </button>
         ))}
       </nav>
@@ -52,7 +90,17 @@ function App() {
             conversation being recorded right now — anything said before that,
             or with recording switched off, exists nowhere else. */}
         <div className={tab === "chat" ? "h-full" : "hidden"}>
-          <Chat />
+          <Chat
+            active={tab === "chat"}
+            onOpenSettings={() => {
+              setSettingsSection("connection");
+              handleTabClick("settings");
+            }}
+            onOpenCharacters={() => {
+              setSelectedCharacterId(null);
+              handleTabClick("characters");
+            }}
+          />
         </div>
         {tab === "characters" &&
           (viewingMemory !== null ? (
@@ -62,15 +110,43 @@ function App() {
               onBack={() => setViewingMemory(null)}
             />
           ) : editingId !== null ? (
-            <CharacterEdit id={editingId} onDone={() => setEditingId(null)} />
+            <CharacterEdit
+              id={editingId}
+              onDone={(savedId) => {
+                if (savedId) setSelectedCharacterId(savedId);
+                closeEditor();
+              }}
+              onDirtyChange={handleDirtyChange}
+            />
           ) : (
             <CharacterList
+              selectedId={selectedCharacterId}
+              onSelect={setSelectedCharacterId}
               onEdit={setEditingId}
               onViewMemory={(id, name) => setViewingMemory({ id, name })}
+              onOpenChat={() => goToTab("chat")}
             />
           ))}
-        {tab === "settings" && <Settings />}
+        {tab === "settings" && (
+          <Settings
+            section={settingsSection}
+            onSectionChange={setSettingsSection}
+          />
+        )}
       </div>
+
+      {pendingTab !== null && (
+        <ConfirmDialog
+          title={t("characterEdit.discardTitle")}
+          body={t("characterEdit.discardBody")}
+          confirmLabel={t("characterEdit.discardConfirm")}
+          onConfirm={() => {
+            goToTab(pendingTab);
+            setPendingTab(null);
+          }}
+          onCancel={() => setPendingTab(null)}
+        />
+      )}
     </div>
   );
 }

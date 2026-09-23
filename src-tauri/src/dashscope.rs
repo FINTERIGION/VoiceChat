@@ -123,7 +123,10 @@ mod tests {
 
     #[test]
     fn snippet_keeps_short_bodies_and_cuts_long_ones() {
-        assert_eq!(snippet("  {\"error\":\"bad key\"}  "), "{\"error\":\"bad key\"}");
+        assert_eq!(
+            snippet("  {\"error\":\"bad key\"}  "),
+            "{\"error\":\"bad key\"}"
+        );
 
         let long = "x".repeat(SNIPPET_CHARS * 3);
         let cut = snippet(&long);

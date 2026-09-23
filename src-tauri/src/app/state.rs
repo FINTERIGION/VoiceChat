@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
@@ -9,4 +10,6 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub session: SessionHandle,
     pub recorder: Mutex<Option<RecorderHandle>>,
+    /// Where character pictures live; see `avatar`.
+    pub avatars_dir: PathBuf,
 }

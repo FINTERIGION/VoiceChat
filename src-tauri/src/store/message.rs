@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -20,6 +20,10 @@ pub struct ConversationSummary {
     pub ended_at: Option<String>,
     pub message_count: i64,
     pub preview: String,
+    /// Whether it has been summarized into the character's long-term memory.
+    /// Every conversation is stored, so this is what tells the ones that
+    /// shaped what the character remembers apart from the rest.
+    pub memorized: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,7 +39,7 @@ pub struct Message {
 /// texts are skipped for the preview — a user turn whose transcription never
 /// arrived is stored blank, and labelling a whole conversation with it would
 /// leave the row looking empty.
-const SUMMARY_SELECT: &str = "SELECT c.id, c.character_id, c.title, c.started_at, c.ended_at, \
+const SUMMARY_SELECT: &str = "SELECT c.id, c.character_id, c.title, c.started_at, c.ended_at, c.memorized, \
      (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) AS message_count, \
      COALESCE((SELECT text FROM messages WHERE conversation_id = c.id AND text <> '' \
                ORDER BY created_at ASC LIMIT 1), '') AS preview \
@@ -50,6 +54,7 @@ fn row_to_summary(row: &rusqlite::Row) -> rusqlite::Result<ConversationSummary> 
         ended_at: row.get("ended_at")?,
         message_count: row.get("message_count")?,
         preview: row.get("preview")?,
+        memorized: row.get("memorized")?,
     })
 }
 
@@ -151,6 +156,17 @@ pub fn set_title_if_untitled(conn: &Connection, id: &str, title: &str) -> rusqli
         params![title, id],
     )?;
     Ok(changed > 0)
+}
+
+/// Records that a summary of this conversation has been stored in its
+/// character's long-term memory. Never cleared: what went into memory stays
+/// there, whatever happens to the conversation afterwards.
+pub fn mark_memorized(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE conversations SET memorized = 1 WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
 }
 
 /// Closes conversations a previous run left open — the app killed, the

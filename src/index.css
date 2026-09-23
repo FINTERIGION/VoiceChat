@@ -95,3 +95,74 @@ input[type="range"]:active::-moz-range-thumb {
 input[type="range"]:focus-visible {
   outline: none;
 }
+
+/* The platform's arrow ignores the dark theme and sits at its own size; a
+   chevron drawn like the app's icons (lucide's chevron-down) takes its
+   place. Unlayered, so this padding wins over the `px-*` in `field`. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 2.25rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a3a3a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 0.75rem center;
+  background-repeat: no-repeat;
+  background-size: 1rem;
+  cursor: pointer;
+}
+
+select:disabled {
+  cursor: not-allowed;
+}
+
+input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex-shrink: 0;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  border: 1.5px solid var(--color-neutral-600);
+  border-radius: 4px;
+  background-color: var(--color-neutral-900);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 0.75rem;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+input[type="checkbox"]:checked {
+  border-color: var(--color-emerald-400);
+  background-color: var(--color-emerald-400);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%230a0a0a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-6.5'/%3E%3C/svg%3E");
+}
+
+/* Hovering the label text lights the box up too, since clicking it toggles. */
+input[type="checkbox"]:not(:disabled):hover,
+label:hover > input[type="checkbox"]:not(:disabled) {
+  border-color: var(--color-neutral-400);
+}
+
+input[type="checkbox"]:checked:not(:disabled):hover,
+label:hover > input[type="checkbox"]:checked:not(:disabled) {
+  border-color: var(--color-emerald-300);
+  background-color: var(--color-emerald-300);
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.2);
+}
+
+input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+label:has(> input[type="checkbox"]:not(:disabled)) {
+  cursor: pointer;
+  user-select: none;
+}
