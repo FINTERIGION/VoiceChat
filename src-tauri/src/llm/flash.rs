@@ -12,6 +12,13 @@ const MODEL: &str = "qwen3.8-flash";
 /// promptly and lets the caller degrade (the subtitle simply stays
 /// single-language; see `subtitle::spawn_translation`).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Ceiling for `complete_long`. Summarizing an 8-message conversation took
+/// 7.6-9.3s with thinking off — and 16-20s with it on, which is how every
+/// summary used to die at `REQUEST_TIMEOUT`. Double the worst measured run
+/// leaves room for a long transcript, while still bounding the stall: the
+/// session actor awaits the summary before a rolling reconnect, and before
+/// it takes the next command after a stop.
+const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One `reqwest::Client` for every call this process ever makes here,
 /// rather than a fresh one per request. A `Client` owns a connection pool
@@ -72,7 +79,7 @@ impl FlashClient {
 
     /// One-shot chat completion; returns the first choice's message content.
     pub async fn complete(&self, system: &str, user: &str) -> Result<String, String> {
-        self.chat(system, user, None).await
+        self.chat(system, user, None, REQUEST_TIMEOUT).await
     }
 
     /// `complete` with the model's thinking step explicitly switched off, for
@@ -80,11 +87,29 @@ impl FlashClient {
     /// reasoning pass costs seconds before the first output token and buys
     /// nothing for a one-line translation.
     pub async fn complete_fast(&self, system: &str, user: &str) -> Result<String, String> {
-        self.chat(system, user, Some(false)).await
+        self.chat(system, user, Some(false), REQUEST_TIMEOUT).await
     }
 
-    /// `thinking: None` leaves the model on its own default.
-    async fn chat(&self, system: &str, user: &str, thinking: Option<bool>) -> Result<String, String> {
+    /// `complete` for a call that reads a whole transcript and writes a
+    /// structured answer (memory summarization): thinking off, since it
+    /// spent ~1000 tokens reasoning over a few lines of small talk without
+    /// a better answer to show for it, and `LONG_REQUEST_TIMEOUT` rather
+    /// than `REQUEST_TIMEOUT`, since a timeout here loses the whole
+    /// conversation's worth of memory, not one subtitle line.
+    pub async fn complete_long(&self, system: &str, user: &str) -> Result<String, String> {
+        self.chat(system, user, Some(false), LONG_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// `thinking: None` leaves the model on its own default. `timeout`
+    /// overrides the shared client's for this request alone.
+    async fn chat(
+        &self,
+        system: &str,
+        user: &str,
+        thinking: Option<bool>,
+        timeout: Duration,
+    ) -> Result<String, String> {
         let mut body = json!({
             "model": MODEL,
             "messages": [
@@ -100,6 +125,7 @@ impl FlashClient {
         let resp = client
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
+            .timeout(timeout)
             .json(&body)
             .send()
             .await

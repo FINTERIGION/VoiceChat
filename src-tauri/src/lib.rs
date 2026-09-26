@@ -128,6 +128,7 @@ pub fn run() {
             )
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let app_dir = app.path().app_data_dir()?;
@@ -189,7 +190,10 @@ pub fn run() {
                 recorder: Mutex::new(None),
                 avatars_dir,
                 voice_samples_dir,
+                pending_update: Mutex::new(None),
             });
+            // After the sweep above, so what it closed can be written.
+            realtime::session::spawn_memory_backfill(app.handle().clone());
 
             let hotkey = match hotkey_setting {
                 None => Some(DEFAULT_HOTKEY.to_string()),
@@ -281,6 +285,8 @@ pub fn run() {
             app::commands::export_character,
             app::commands::open_character_file,
             app::commands::import_character,
+            app::commands::check_for_update,
+            app::commands::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

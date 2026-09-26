@@ -1,0 +1,12 @@
+-- Whether a conversation still owes its character's long-term memory a
+-- summary: set while one that counts toward memory is under way (following
+-- "本次不计入记忆" as it is switched), cleared once its summary has been
+-- written. The set rows of a character are its memory queue, written in the
+-- order they started (see `realtime::session::drain_memory_queue`), so one
+-- the app was killed before finishing, or whose summary failed, gets written
+-- later without landing after conversations that came after it.
+--
+-- Existing rows start clear. Whether one of them was opted out was never
+-- stored, and summarizing a month-old conversation into the rolling summary
+-- as if it had just happened would misplace it anyway.
+ALTER TABLE conversations ADD COLUMN memory_pending INTEGER NOT NULL DEFAULT 0;

@@ -13,6 +13,11 @@ export const en = {
   "nav.characters": "Characters",
   "nav.settings": "Settings",
 
+  // ---- Update banner ----
+  "update.banner": "VoiceChat {version} is available.",
+  "update.view": "View update",
+  "update.later": "Later",
+
   // ---- Shared ----
   "common.loading": "Loading…",
   "common.save": "Save",
@@ -320,6 +325,7 @@ export const en = {
   "settings.nav.connection": "Connection",
   "settings.nav.conversation": "Conversation",
   "settings.nav.connectionMissing": "No API key configured yet",
+  "settings.nav.updateAvailable": "Update available",
   "settings.autosave": "Changes are saved as you make them",
   "settings.language.heading": "Display language",
   "settings.language.hint":
@@ -413,4 +419,18 @@ export const en = {
   "settings.voices.deleteTitle": "Delete this voice?",
   "settings.voices.deleteBody":
     "{id} will be permanently deleted from your DashScope account, along with the audio sample kept for it on this device, and cannot be recovered; using it again would mean recording or designing it from scratch.",
+  "settings.about.heading": "About",
+  "settings.about.version": "Version {version}",
+  "settings.update.check": "Check for updates",
+  "settings.update.checking": "Checking…",
+  "settings.update.latest": "You're on the latest version.",
+  "settings.update.available": "Version {version} is available",
+  "settings.update.released": "Released {date}",
+  "settings.update.install": "Download and install",
+  "settings.update.installHint":
+    "The app closes while the update installs, then opens again by itself. A conversation in progress will end.",
+  "settings.update.downloading": "Downloading… {percent}%",
+  "settings.update.downloadingSize": "Downloading… {size} MB",
+  "settings.update.installing":
+    "Starting the installer — the app will close and reopen shortly.",
 } as const;

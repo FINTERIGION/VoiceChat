@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { MessageCircle, Settings as SettingsIcon, Users } from "lucide-react";
 import ConfirmDialog from "./components/ConfirmDialog";
+import UpdateBanner from "./components/UpdateBanner";
 import { useT } from "./lib/i18n";
 import { tabBtn } from "./lib/ui";
 import CharacterEdit from "./routes/CharacterEdit";
@@ -56,6 +57,11 @@ function App() {
     setViewingMemory(null);
   }
 
+  function openSettingsAt(section: SettingsSection) {
+    setSettingsSection(section);
+    handleTabClick("settings");
+  }
+
   function handleTabClick(next: Tab) {
     if (editingId !== null && editDirty.current) {
       setPendingTab(next);
@@ -83,6 +89,10 @@ function App() {
           </button>
         ))}
       </nav>
+      <UpdateBanner
+        hidden={tab === "settings" && settingsSection === "about"}
+        onView={() => openSettingsAt("about")}
+      />
       <div className="flex-1 overflow-y-auto">
         {/* Kept mounted (hidden via CSS) instead of conditionally rendered so
             switching tabs doesn't wipe the in-memory chat transcript. Chat
@@ -92,10 +102,7 @@ function App() {
         <div className={tab === "chat" ? "h-full" : "hidden"}>
           <Chat
             active={tab === "chat"}
-            onOpenSettings={() => {
-              setSettingsSection("connection");
-              handleTabClick("settings");
-            }}
+            onOpenSettings={() => openSettingsAt("connection")}
             onOpenCharacters={() => {
               setSelectedCharacterId(null);
               handleTabClick("characters");

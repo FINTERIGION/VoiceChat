@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::app::state::AppState;
 use crate::avatar::{self, generate::ImageClient};
@@ -1386,4 +1389,128 @@ pub async fn import_character(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+// ---- Updates ----
+
+/// A newer release than the one running, as `check_for_update` found it.
+#[derive(Serialize)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub current_version: String,
+    /// The release notes, which the release workflow takes from the tag.
+    pub notes: Option<String>,
+    /// When it was published, RFC 3339.
+    pub date: Option<String>,
+}
+
+/// How `install_update` is getting on, streamed to the page as it goes.
+#[derive(Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum UpdateDownloadEvent {
+    Progress {
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    /// Downloaded and its signature checked; the installer takes over next.
+    Installing,
+}
+
+/// Reads the `latest.json` the release workflow attaches to each GitHub
+/// release and resolves to what it offers — or `None` when this is already
+/// the newest version.
+#[tauri::command]
+pub async fn check_for_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<UpdateInfo>, String> {
+    let exiting = app.clone();
+    let updater = app
+        .updater_builder()
+        .timeout(Duration::from_secs(30))
+        // On Windows, installing starts the installer and then ends the
+        // process on the spot, so `RunEvent::Exit` never fires. This does
+        // what that handler would, plus the cleanup the plugin's own hook
+        // does, which this one replaces.
+        .on_before_exit(move || {
+            exiting.state::<AppState>().session.shutdown();
+            exiting.cleanup_before_exit();
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    let found = updater.check().await.map_err(|e| match e {
+        // What the update URL answers until a release has been published.
+        tauri_plugin_updater::Error::ReleaseNotFound => crate::tr!(
+            "No published release was found to update from.",
+            "没有找到可用于更新的已发布版本。"
+        )
+        .to_string(),
+        e => crate::tr!(
+            format!("Couldn't check for updates: {e}"),
+            format!("检查更新失败：{e}")
+        ),
+    })?;
+    let info = found.as_ref().map(|update| UpdateInfo {
+        version: update.version.clone(),
+        current_version: update.current_version.clone(),
+        notes: update.body.clone().filter(|notes| !notes.trim().is_empty()),
+        date: update
+            .raw_json
+            .get("pub_date")
+            .and_then(|date| date.as_str())
+            .map(str::to_owned),
+    });
+    *state.pending_update.lock().map_err(|e| e.to_string())? = found;
+    Ok(info)
+}
+
+/// Downloads the release the last check found, verifies its signature
+/// against the public key in `tauri.conf.json`, and starts its installer,
+/// which closes the app and opens it again when done. On Windows this never
+/// returns `Ok`: the process ends as soon as the installer is running.
+#[tauri::command]
+pub async fn install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    on_event: Channel<UpdateDownloadEvent>,
+) -> Result<(), String> {
+    let update = state
+        .pending_update
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| crate::tr!("Check for updates first.", "请先检查更新。").to_string())?;
+    let mut downloaded = 0u64;
+    let mut reported = 0u64;
+    let bytes = update
+        .download(
+            |chunk, total| {
+                downloaded += chunk as u64;
+                // Chunks are a few KB each; a message per percent (or per
+                // MiB, when the size isn't known) is plenty for a progress bar.
+                let step = total.map_or(1 << 20, |total| (total / 100).max(1));
+                if downloaded - reported >= step || Some(downloaded) == total {
+                    reported = downloaded;
+                    let _ = on_event.send(UpdateDownloadEvent::Progress { downloaded, total });
+                }
+            },
+            || {
+                let _ = on_event.send(UpdateDownloadEvent::Installing);
+            },
+        )
+        .await
+        .map_err(|e| {
+            crate::tr!(
+                format!("Couldn't download the update: {e}"),
+                format!("下载更新失败：{e}")
+            )
+        })?;
+    update.install(bytes).map_err(|e| {
+        crate::tr!(
+            format!("Couldn't start the installer: {e}"),
+            format!("无法启动安装程序：{e}")
+        )
+    })?;
+    // Only reached where installing doesn't end the process by itself.
+    app.restart()
 }

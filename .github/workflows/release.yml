@@ -1,0 +1,76 @@
+name: Release
+
+# Pushing a version tag (`v0.2.0`) builds the Windows installers and attaches
+# them to a draft GitHub release, together with the `latest.json` the in-app
+# updater reads. The app only sees a release once the draft is published —
+# see "Releasing" in README.md.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match the version in package.json ($version)"
+            exit 1
+          fi
+
+      - name: Read the release notes from the tag
+        id: notes
+        shell: bash
+        run: |
+          # Checkout leaves the tag pointing straight at the commit, without
+          # the annotated tag object that holds the message.
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" = tag ]; then
+            # The message follows the header's blank line; a signature, if
+            # the tag has one, trails it.
+            notes=$(git cat-file tag "$GITHUB_REF_NAME" \
+              | sed -e '1,/^$/d' -e '/^-----BEGIN .* SIGNATURE-----$/,$d')
+          fi
+          {
+            echo "body<<EOF_RELEASE_NOTES"
+            printf '%s\n' "${notes:-VoiceChat $GITHUB_REF_NAME}"
+            echo "EOF_RELEASE_NOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the installers so the updater in already-installed copies
+          # will accept them; the public half is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: VoiceChat ${{ github.ref_name }}
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: true
+          # The plain `windows-x86_64` entry in `latest.json` — what a copy
+          # that can't tell which installer it came from updates with —
+          # points at the setup .exe rather than the .msi.
+          updaterJsonPreferNsis: true
+          args: --config src-tauri/tauri.updater.conf.json

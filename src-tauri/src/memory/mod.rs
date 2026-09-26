@@ -128,7 +128,7 @@ pub async fn summarize_conversation(
     user.push_str("本轮对话：\n");
     user.push_str(&transcript);
 
-    let raw = client.complete(system, &user).await?;
+    let raw = client.complete_long(system, &user).await?;
     parse_summary(&raw, known_facts.len())
 }
 

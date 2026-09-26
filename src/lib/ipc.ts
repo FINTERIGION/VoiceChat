@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   BackupExport,
@@ -21,6 +22,8 @@ import type {
   SubtitleSettings,
   SubtitleTranslationEvent,
   TranscriptEvent,
+  UpdateDownloadEvent,
+  UpdateInfo,
   VadSettings,
 } from "./types";
 
@@ -156,6 +159,20 @@ export const ipc = {
    */
   importCharacter: (character: SharedCharacter) =>
     invoke<Character>("import_character", { character }),
+
+  getAppVersion: () => getVersion(),
+  /** Resolves to `null` when this is already the newest release. */
+  checkForUpdate: () => invoke<UpdateInfo | null>("check_for_update"),
+  /**
+   * Downloads the release the last check found and starts its installer,
+   * which closes the app and reopens it once done — so this only ever
+   * reports progress or rejects; it never resolves.
+   */
+  installUpdate: (onEvent: (event: UpdateDownloadEvent) => void) => {
+    const channel = new Channel<UpdateDownloadEvent>();
+    channel.onmessage = onEvent;
+    return invoke<void>("install_update", { onEvent: channel });
+  },
 };
 
 export function onChatState(

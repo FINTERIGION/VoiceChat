@@ -450,34 +450,65 @@ async fn name_conversation(app: AppHandle, character_name: String, conversation_
     }
 }
 
-/// Writes what was said into `memories` (rolling summary + facts), leaving
-/// the conversation row itself open, and marks the row as memorized once the
-/// summary is stored. Callers decide whether the conversation counts toward
-/// memory at all; this only does the writing.
+/// Held by whoever is writing summaries into memory, from reading the memory
+/// to storing the result. Each summary folds into the one before it, so two
+/// written at once — the launch backfill and a conversation that ended
+/// meanwhile, or a character switch's background finalize and the next
+/// conversation's — would both start from the same previous summary, and
+/// whichever stored second would drop the other's.
+static MEMORY_WRITER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Proof of holding `MEMORY_WRITER`, which everything that writes a summary
+/// takes.
+type MemoryWriter = tokio::sync::MutexGuard<'static, ()>;
+
+/// How many failed summaries a queued conversation gets before its queue
+/// gives up on it and moves on. A failure is retried whenever the queue is
+/// next drained — the next conversation with that character ending, or the
+/// next launch — so a network outage costs a retry or two, not the
+/// conversation; while one the API rejects every time (content moderation,
+/// say) holds the character's memory back for this many of those at most.
+const MAX_MEMORY_ATTEMPTS: u32 = 3;
+
+/// Why `write_summary` wrote nothing.
+enum WriteFailure {
+    /// It never got to try: no API key, or the database out of reach. Not
+    /// the conversation's fault, so not counted against it.
+    Unavailable,
+    /// The summary call failed, or storing what it returned did.
+    Failed,
+}
+
+/// Writes what was said into `memories` (rolling summary + facts), and marks
+/// the row as memorized once the summary is stored. A conversation with
+/// nothing in it is written trivially.
 ///
-/// Split out from `finalize_conversation` because a rolling reconnect needs
-/// the summary — it is what the next connection's instructions are built
-/// from, the server-side context being exactly what just ran out — but must
-/// not end the conversation, which the user is still in the middle of.
-async fn summarize_into_memory(
+/// Leaves the row's place in the memory queue to the caller: a rolling
+/// reconnect writes a conversation that stays queued, since it is still
+/// going.
+async fn write_summary(
     app: &AppHandle,
+    _writing: &MemoryWriter,
     character_id: &str,
     character_name: &str,
     conversation_id: &str,
-) {
+) -> Result<(), WriteFailure> {
     let (messages, previous_summary, known_facts, previous_loops, api_key, workspace_id, region) = {
         let state = app.state::<AppState>();
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("db lock failed during conversation summarize: {e}");
-                return;
+                return Err(WriteFailure::Unavailable);
             }
         };
-        let messages = message_store::list_messages(&conn, conversation_id).unwrap_or_else(|e| {
-            tracing::error!("failed to list messages for summarization: {e}");
-            Vec::new()
-        });
+        let messages = match message_store::list_messages(&conn, conversation_id) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("failed to list messages for summarization: {e}");
+                return Err(WriteFailure::Unavailable);
+            }
+        };
         let stored = memory_store::list(&conn, character_id).unwrap_or_default();
         let previous_summary = stored
             .iter()
@@ -507,10 +538,10 @@ async fn summarize_into_memory(
     };
 
     if messages.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(api_key) = api_key else {
-        return;
+        return Err(WriteFailure::Unavailable);
     };
 
     let client = FlashClient::new(api_key, workspace_id, region.as_deref());
@@ -539,16 +570,136 @@ async fn summarize_into_memory(
             match stored {
                 // The row's `memorized` just changed, which the history
                 // list's delete dialog reads.
-                Ok(()) => emit_conversations(app),
-                Err(e) => tracing::error!("failed to store memory summary: {e}"),
+                Ok(()) => {
+                    emit_conversations(app);
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::error!("failed to store memory summary: {e}");
+                    Err(WriteFailure::Failed)
+                }
             }
         }
-        Err(e) => tracing::warn!("memory summarization failed: {e}"),
+        Err(e) => {
+            tracing::warn!("memory summarization failed: {e}");
+            Err(WriteFailure::Failed)
+        }
     }
 }
 
-/// Ends the conversation row and, if `memorize` and it has any content,
-/// summarizes it into `memories`.
+/// Writes `character_id`'s memory queue into memory, oldest first, taking
+/// each conversation off it once written. Stops at the first one still going
+/// (or still being ended), since nothing after it may be written ahead of
+/// it; and at the first that fails, which stays at the head to be retried
+/// the next time round, holding the rest back with it.
+///
+/// Returns whether everything queued ahead of `live` got written — `live`
+/// being the conversation a rolling reconnect is about to write mid-way,
+/// which has to wait its turn like any other.
+///
+/// With the character's memory since switched off, the queue is dropped
+/// instead: the switch takes what it hasn't written yet out of memory too.
+async fn drain_memory_queue(
+    app: &AppHandle,
+    writing: &MemoryWriter,
+    character_id: &str,
+    live: Option<&str>,
+) -> bool {
+    let read = {
+        let state = app.state::<AppState>();
+        state.db.lock().map_err(|e| e.to_string()).and_then(|conn| {
+            let character = character::get(&conn, character_id).map_err(|e| e.to_string())?;
+            let queue =
+                message_store::memory_queue(&conn, character_id).map_err(|e| e.to_string())?;
+            Ok((character, queue))
+        })
+    };
+    let (character, queue) = match read {
+        Ok(read) => read,
+        Err(e) => {
+            tracing::error!("failed to read the memory queue: {e}");
+            return false;
+        }
+    };
+    // Deleted, and its conversations with it.
+    let Some(character) = character else {
+        return true;
+    };
+
+    for queued in queue {
+        let id = queued.conversation_id.as_str();
+        if !queued.ended {
+            return Some(id) == live;
+        }
+        if !character.memory_enabled {
+            set_memory_pending(app, id, false);
+            continue;
+        }
+        match write_summary(app, writing, character_id, &character.name, id).await {
+            Ok(()) => set_memory_pending(app, id, false),
+            Err(WriteFailure::Unavailable) => return false,
+            Err(WriteFailure::Failed) => {
+                let attempts = {
+                    let state = app.state::<AppState>();
+                    state.db.lock().map_err(|e| e.to_string()).and_then(|conn| {
+                        message_store::count_memory_failure(&conn, id).map_err(|e| e.to_string())
+                    })
+                };
+                match attempts {
+                    Ok(Some(n)) if n < MAX_MEMORY_ATTEMPTS => {
+                        tracing::warn!(
+                            "summary of conversation {id} failed ({n} of {MAX_MEMORY_ATTEMPTS}); \
+                             holding its character's later conversations until it is written"
+                        );
+                        return false;
+                    }
+                    Ok(Some(_)) => {
+                        tracing::warn!(
+                            "giving up on conversation {id}'s summary after {MAX_MEMORY_ATTEMPTS} \
+                             failures; it stays out of memory"
+                        );
+                        set_memory_pending(app, id, false);
+                    }
+                    // Deleted from the history while its summary was being
+                    // written, so there is nothing left to hold the queue for.
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!("failed to count a failed summary: {e}");
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The rolling reconnect's summary: the live conversation written into
+/// memory mid-way, since the next connection's instructions are built from
+/// it, the server-side context being exactly what just ran out. It stays
+/// queued, to be written again, whole, when it ends.
+///
+/// Only once everything queued ahead of it is written, so it can't land
+/// before them. If that is still failing, the next connection carries on
+/// through its recent lines alone, as one that doesn't count toward memory
+/// does.
+async fn roll_into_memory(
+    app: &AppHandle,
+    character_id: &str,
+    character_name: &str,
+    conversation_id: &str,
+) {
+    let writing = MEMORY_WRITER.lock().await;
+    if drain_memory_queue(app, &writing, character_id, Some(conversation_id)).await {
+        // Already logged, and nothing to count: it isn't the queue's to
+        // retry until it ends.
+        let _ = write_summary(app, &writing, character_id, character_name, conversation_id).await;
+    }
+}
+
+/// Ends the conversation row and writes its character's memory queue, which
+/// it joins if `memorize` — so it is written now, unless something queued
+/// ahead of it is still failing.
 ///
 /// Called when the session is genuinely done writing to this row — not on a
 /// dropped-socket or rolling reconnect, which carries on with the same
@@ -579,6 +730,15 @@ async fn finalize_conversation(
         let state = app.state::<AppState>();
         match state.db.lock() {
             Ok(conn) => {
+                // `memorize` is the last word on whether it is queued,
+                // whatever earlier writes left in the row. Settled before
+                // the row is ended, while a drain running meanwhile (the
+                // launch backfill) still waits on it as live, so that drain
+                // can't write it on the old mark and this one again.
+                if let Err(e) = message_store::set_memory_pending(&conn, conversation_id, memorize)
+                {
+                    tracing::error!("failed to queue conversation for memory: {e}");
+                }
                 if let Err(e) = message_store::end_conversation(&conn, conversation_id) {
                     tracing::error!("failed to end conversation: {e}");
                 }
@@ -587,9 +747,51 @@ async fn finalize_conversation(
         }
     }
 
-    if memorize {
-        summarize_into_memory(app, character_id, character_name, conversation_id).await;
+    // Run even when this one doesn't count, to retry whatever an earlier
+    // failure left queued.
+    let writing = MEMORY_WRITER.lock().await;
+    drain_memory_queue(app, &writing, character_id, None).await;
+}
+
+fn set_memory_pending(app: &AppHandle, conversation_id: &str, pending: bool) {
+    let state = app.state::<AppState>();
+    let result = state.db.lock().map_err(|e| e.to_string()).and_then(|conn| {
+        message_store::set_memory_pending(&conn, conversation_id, pending)
+            .map_err(|e| e.to_string())
+    });
+    if let Err(e) = result {
+        tracing::error!("failed to mark conversation's memory as pending={pending}: {e}");
     }
+}
+
+/// Drains every character's memory queue — whatever a previous run left in
+/// them: conversations it was killed before finishing, whether mid-way or
+/// with the summary on the way out still in flight, and ones whose summary
+/// failed.
+///
+/// In the background, so the first conversation of the launch doesn't wait
+/// on it; one started while this is still running is built without what it
+/// adds.
+pub fn spawn_memory_backfill(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let writing = MEMORY_WRITER.lock().await;
+        let characters = {
+            let state = app.state::<AppState>();
+            state.db.lock().map_err(|e| e.to_string()).and_then(|conn| {
+                message_store::characters_with_memory_queued(&conn).map_err(|e| e.to_string())
+            })
+        };
+        let characters = match characters {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("failed to read the memory queues: {e}");
+                return;
+            }
+        };
+        for character_id in characters {
+            drain_memory_queue(&app, &writing, &character_id, None).await;
+        }
+    });
 }
 
 /// A conversation row held open across a reconnect the user never asked
@@ -762,6 +964,11 @@ async fn run(
             Some(carried) => Some(carried.id),
             None => start_conversation_row(&app, &character_id),
         };
+        // Rewritten for a carried row too, whose choice may just have been
+        // narrowed above.
+        if let Some(id) = &conversation_id {
+            set_memory_pending(&app, id, recording);
+        }
         set_active_conversation(&app, &active_conversation, conversation_id.clone());
 
         let mut is_talking = initial_talking;
@@ -932,6 +1139,9 @@ async fn run(
                             if memory_enabled {
                                 recording = on;
                                 emit_recording(&app, Some(recording));
+                                if let Some(id) = &conversation_id {
+                                    set_memory_pending(&app, id, recording);
+                                }
                             }
                         }
                         Some(SessionCommand::NewConversation) => {
@@ -1048,7 +1258,7 @@ async fn run(
                 // that doesn't count toward memory carries on through its
                 // recent lines alone (see `connect_with_config`).
                 if matches!(&reason, Disconnect::Rolling) && recording {
-                    summarize_into_memory(&app, &character_id, &character_name, &conv_id).await;
+                    roll_into_memory(&app, &character_id, &character_name, &conv_id).await;
                 }
                 carried_conversation = Some(CarriedConversation {
                     id: conv_id,

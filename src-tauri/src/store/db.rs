@@ -8,6 +8,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0003_conversation_titles.sql"),
     include_str!("migrations/0004_conversation_memorized.sql"),
     include_str!("migrations/0005_voice_samples.sql"),
+    include_str!("migrations/0006_conversation_memory_pending.sql"),
+    include_str!("migrations/0007_conversation_memory_attempts.sql"),
 ];
 
 pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {

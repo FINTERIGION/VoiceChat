@@ -14,6 +14,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Info,
   Keyboard,
   Library,
   LoaderCircle,
@@ -37,6 +38,7 @@ import {
 } from "../lib/i18n";
 import { formatDateTime, formatHotkey } from "../lib/format";
 import { ipc } from "../lib/ipc";
+import { useUpdates } from "../lib/update";
 import type {
   ConnectionSettings,
   ManagedVoice,
@@ -53,7 +55,8 @@ export type SettingsSection =
   | "conversation"
   | "subtitle"
   | "voices"
-  | "backup";
+  | "backup"
+  | "about";
 
 const SECTIONS: { id: SettingsSection; label: MessageKey; icon: LucideIcon }[] =
   [
@@ -63,6 +66,7 @@ const SECTIONS: { id: SettingsSection; label: MessageKey; icon: LucideIcon }[] =
     { id: "subtitle", label: "settings.subtitle.heading", icon: Captions },
     { id: "voices", label: "settings.voices.heading", icon: Library },
     { id: "backup", label: "settings.backup.heading", icon: DatabaseBackup },
+    { id: "about", label: "settings.about.heading", icon: Info },
   ];
 
 const MODIFIER_CODES = new Set([
@@ -173,6 +177,7 @@ export default function Settings({
   onSectionChange: (section: SettingsSection) => void;
 }) {
   const t = useT();
+  const { state: update } = useUpdates();
   // Shared by the sections that depend on there being a key, and by the
   // nav, which flags the Connection section while there isn't one.
   const [status, setStatus] = useState<SecretStatus | null>(null);
@@ -205,6 +210,7 @@ export default function Settings({
             const selected = id === section;
             const missingKey =
               id === "connection" && status !== null && !status.configured;
+            const updateReady = id === "about" && update.kind === "available";
             return (
               <li key={id}>
                 <button
@@ -224,6 +230,14 @@ export default function Settings({
                       title={t("settings.nav.connectionMissing")}
                       aria-label={t("settings.nav.connectionMissing")}
                       className="size-2 shrink-0 rounded-full bg-amber-400"
+                    />
+                  )}
+                  {updateReady && (
+                    <span
+                      role="img"
+                      title={t("settings.nav.updateAvailable")}
+                      aria-label={t("settings.nav.updateAvailable")}
+                      className="size-2 shrink-0 rounded-full bg-emerald-400"
                     />
                   )}
                 </button>
@@ -251,6 +265,7 @@ export default function Settings({
           {section === "backup" && (
             <BackupSection status={status} refreshStatus={refreshStatus} />
           )}
+          {section === "about" && <AboutSection />}
         </div>
       </div>
     </div>
@@ -1262,5 +1277,140 @@ function BackupSection({
         />
       )}
     </Card>
+  );
+}
+
+// ---- About ----------------------------------------------------------------
+
+function AboutSection() {
+  const { lang, t } = useI18n();
+  const { state, check, install } = useUpdates();
+  const [version, , versionError] = useLoaded(ipc.getAppVersion);
+
+  // Opening About is asking whether this is the newest version, so it looks
+  // unless something already has.
+  useEffect(() => {
+    if (state.kind === "idle") void check();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const busy =
+    state.kind === "checking" ||
+    state.kind === "downloading" ||
+    state.kind === "installing";
+  const info =
+    state.kind === "available" ||
+    state.kind === "downloading" ||
+    state.kind === "installing" ||
+    state.kind === "failed"
+      ? state.info
+      : null;
+
+  return (
+    <Card
+      title="VoiceChat"
+      description={
+        version !== undefined
+          ? t("settings.about.version", { version })
+          : (versionError ?? t("common.loading"))
+      }
+      action={
+        <button
+          onClick={() => void check()}
+          disabled={busy}
+          className={`${btn.outline} gap-2 px-3 py-2 text-sm`}
+        >
+          <RefreshCw
+            className={`size-4 ${state.kind === "checking" ? "animate-spin" : ""}`}
+          />
+          {state.kind === "checking"
+            ? t("settings.update.checking")
+            : t("settings.update.check")}
+        </button>
+      }
+    >
+      {state.kind === "latest" && (
+        <Outcome ok>{t("settings.update.latest")}</Outcome>
+      )}
+
+      {info && (
+        <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-4">
+          <div>
+            <p className="text-sm font-medium text-emerald-400">
+              {t("settings.update.available", { version: info.version })}
+            </p>
+            {info.date && (
+              <p className="mt-0.5 text-xs text-neutral-500">
+                {t("settings.update.released", {
+                  date: formatDateTime(info.date, lang),
+                })}
+              </p>
+            )}
+          </div>
+          {info.notes && (
+            <div className="max-h-48 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap text-neutral-300">
+              {info.notes}
+            </div>
+          )}
+
+          {state.kind === "downloading" ? (
+            <DownloadProgress
+              downloaded={state.downloaded}
+              total={state.total}
+            />
+          ) : state.kind === "installing" ? (
+            <p className="flex items-center gap-1.5 text-sm text-neutral-400">
+              <LoaderCircle className="size-4 animate-spin" />
+              {t("settings.update.installing")}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <button
+                onClick={() => void install()}
+                className={`${btn.primary} gap-2 px-3 py-2 text-sm`}
+              >
+                <Download className="size-4" />
+                {t("settings.update.install")}
+              </button>
+              <p className="text-xs leading-relaxed text-neutral-500">
+                {t("settings.update.installHint")}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {state.kind === "failed" && <Outcome ok={false}>{state.message}</Outcome>}
+    </Card>
+  );
+}
+
+function DownloadProgress({
+  downloaded,
+  total,
+}: {
+  downloaded: number;
+  total: number | null;
+}) {
+  const t = useT();
+  const percent = total
+    ? Math.min(100, Math.floor((downloaded / total) * 100))
+    : null;
+  return (
+    <div className="space-y-1.5">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
+        <div
+          className={`h-full bg-emerald-400 transition-[width] duration-200 ${percent === null ? "w-1/3 animate-pulse" : ""}`}
+          style={percent === null ? undefined : { width: `${percent}%` }}
+        />
+      </div>
+      <p aria-live="polite" className="text-xs text-neutral-500">
+        {percent !== null
+          ? t("settings.update.downloading", { percent })
+          : t("settings.update.downloadingSize", {
+              size: (downloaded / 1024 / 1024).toFixed(1),
+            })}
+      </p>
+    </div>
   );
 }

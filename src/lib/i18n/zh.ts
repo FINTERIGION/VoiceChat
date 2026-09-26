@@ -11,6 +11,11 @@ export const zhCN: Messages = {
   "nav.characters": "角色",
   "nav.settings": "设置",
 
+  // ---- Update banner ----
+  "update.banner": "VoiceChat {version} 已发布。",
+  "update.view": "查看更新",
+  "update.later": "稍后",
+
   // ---- Shared ----
   "common.loading": "加载中…",
   "common.save": "保存",
@@ -289,6 +294,7 @@ export const zhCN: Messages = {
   "settings.nav.connection": "连接",
   "settings.nav.conversation": "对话",
   "settings.nav.connectionMissing": "尚未配置 API Key",
+  "settings.nav.updateAvailable": "有可用更新",
   "settings.autosave": "修改会自动保存",
   "settings.language.heading": "显示语言",
   "settings.language.hint":
@@ -373,4 +379,17 @@ export const zhCN: Messages = {
   "settings.voices.deleteTitle": "删除音色？",
   "settings.voices.deleteBody":
     "{id} 会从你的 DashScope 账号中永久删除，本机为它保存的音频样本也会一并删除，无法恢复；如果之后还想用，需要重新录制或重新设计。",
+  "settings.about.heading": "关于",
+  "settings.about.version": "版本 {version}",
+  "settings.update.check": "检查更新",
+  "settings.update.checking": "正在检查…",
+  "settings.update.latest": "已是最新版本。",
+  "settings.update.available": "发现新版本 {version}",
+  "settings.update.released": "发布于 {date}",
+  "settings.update.install": "下载并安装",
+  "settings.update.installHint":
+    "安装更新时应用会关闭，完成后自动重新打开。进行中的对话会被中断。",
+  "settings.update.downloading": "正在下载… {percent}%",
+  "settings.update.downloadingSize": "正在下载… {size} MB",
+  "settings.update.installing": "正在启动安装程序，应用即将关闭并重新打开。",
 };

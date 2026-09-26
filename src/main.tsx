@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import Subtitle from "./routes/Subtitle";
 import { I18nProvider } from "./lib/i18n";
+import { UpdateProvider } from "./lib/update";
 import "./index.css";
 
 // The subtitle window loads the same `index.html` as the main one (see
@@ -17,5 +18,13 @@ const isSubtitleWindow = getCurrentWindow().label === "subtitle";
 // never happens in a production build anyway, so this only affects dev-mode
 // fidelity, not the shipped app's correctness.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <I18nProvider>{isSubtitleWindow ? <Subtitle /> : <App />}</I18nProvider>,
+  <I18nProvider>
+    {isSubtitleWindow ? (
+      <Subtitle />
+    ) : (
+      <UpdateProvider>
+        <App />
+      </UpdateProvider>
+    )}
+  </I18nProvider>,
 );

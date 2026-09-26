@@ -204,3 +204,19 @@ export interface BackupImportSummary {
   settings_restored: boolean;
   api_key_restored: boolean;
 }
+
+/** A newer release than the one running, as `check_for_update` found it. */
+export interface UpdateInfo {
+  version: string;
+  current_version: string;
+  /** The release notes, taken from the release's tag. */
+  notes: string | null;
+  /** When it was published, RFC 3339. */
+  date: string | null;
+}
+
+/** How `install_update` is getting on. */
+export type UpdateDownloadEvent =
+  | { event: "progress"; downloaded: number; total: number | null }
+  /** Downloaded and verified; the installer takes over next. */
+  | { event: "installing" };
