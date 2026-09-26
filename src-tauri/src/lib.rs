@@ -10,11 +10,12 @@ mod realtime;
 mod secrets;
 mod store;
 mod subtitle;
+mod tray;
 mod voice;
 
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 
 use app::state::AppState;
@@ -110,6 +111,14 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Must be the first plugin. A second launch exits while plugins are
+        // initialized in `build` — before `setup` below, whose sweeps and
+        // closing of dangling conversations would otherwise hit the data of
+        // the instance that's still running — after asking that instance to
+        // bring its window back, which matters since it may be in the tray.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
         // Character pictures, as `<img src>` for the webview — see `avatar`.
         .register_uri_scheme_protocol("avatar", |ctx, request| {
             let state = ctx.app_handle().try_state::<AppState>();
@@ -146,6 +155,17 @@ pub fn run() {
                 0 => {}
                 n => tracing::info!("removed {n} avatar(s) no character uses"),
             }
+            // Samples are recorded against their voice as soon as they are
+            // written, but a backup restore writes its files before the
+            // transaction that points at them, and a restore that then fails
+            // leaves them behind.
+            let voice_samples_dir = app_dir.join(voice::sample::DIR_NAME);
+            std::fs::create_dir_all(&voice_samples_dir)?;
+            let kept = store::voice_sample::file_names(&conn)?;
+            match voice::sample::sweep(&voice_samples_dir, &kept) {
+                0 => {}
+                n => tracing::info!("removed {n} voice sample(s) no voice uses"),
+            }
             // `None` (key never set) means "use the default"; `Some("")`
             // means the user explicitly disabled the hotkey in Settings.
             let hotkey_setting = store::db::get_setting(&conn, "hotkey")?;
@@ -160,12 +180,15 @@ pub fn run() {
                 _ => i18n::DEFAULT,
             });
 
+            tray::create(app.handle())?;
+
             let session = realtime::session::spawn(app.handle().clone());
             app.manage(AppState {
                 db: Mutex::new(conn),
                 session,
                 recorder: Mutex::new(None),
                 avatars_dir,
+                voice_samples_dir,
             });
 
             let hotkey = match hotkey_setting {
@@ -186,6 +209,19 @@ pub fn run() {
             }
 
             Ok(())
+        })
+        // Closing the main window sends the app to the tray instead of
+        // quitting it; `tray` is where it's brought back or really exited.
+        .on_window_event(|window, event| {
+            if window.label() != tray::MAIN_WINDOW {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(e) = window.hide() {
+                    tracing::error!("failed to hide main window: {e}");
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             app::commands::get_secret_status,
@@ -234,12 +270,17 @@ pub fn run() {
             app::commands::start_recording,
             app::commands::stop_recording,
             app::commands::clone_voice,
+            app::commands::get_voice_sample,
             app::commands::design_voice_preview,
+            app::commands::discard_design_previews,
             app::commands::slugify,
             app::commands::list_voices,
             app::commands::delete_voice,
             app::commands::export_backup,
             app::commands::import_backup,
+            app::commands::export_character,
+            app::commands::open_character_file,
+            app::commands::import_character,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

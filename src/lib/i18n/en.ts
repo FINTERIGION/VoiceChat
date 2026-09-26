@@ -111,6 +111,51 @@ export const en = {
   "characters.deleteTitle": "Delete character “{name}”?",
   "characters.deleteBody":
     "Every conversation and long-term memory belonging to this character goes with it, and cannot be recovered.",
+  "characters.import": "Import",
+  "characters.importTitle": "Import a character someone shared with you",
+  "characters.share": "Share",
+  "characters.shareTitle":
+    "Export this character to a file someone else can import",
+  "characters.shared": "Exported to {path}",
+
+  // ---- Sharing a character ----
+  "share.title": "Share “{name}”",
+  "share.intro":
+    "Exports this character's persona, avatar and voice to a file. Whoever you send it to can import it and start talking — their copy of the voice is made under their own account. Memories, conversations and your API key are not included.",
+  "share.includeAvatar": "Include the avatar",
+  "share.voice": "Voice",
+  "share.presetHint":
+    "{voice} — a preset, so the same voice is used on their side as it is.",
+  "share.clonedNote":
+    "No sample was kept for this voice, so attach one for their copy to be cloned from, or describe the voice instead.",
+  "share.keptSample": "The audio this voice was made from:",
+  "share.keptHint":
+    "Their copy is cloned from this same audio, so it will sound almost exactly like yours. Only share a voice that is yours, or that you have permission to share.",
+  "share.replaceSample": "Or share a different sample instead:",
+  "share.useKept": "Use the kept sample again",
+  "share.source.audio": "Audio sample",
+  "share.source.description": "Description",
+  "share.descriptionHint":
+    "Their copy is designed from this description, so it will sound similar but not identical.",
+  "share.chooseSample": "Or choose an audio file…",
+  "share.audioHint":
+    "Their copy is cloned from this sample: 10–20 seconds of clear speech works best. Only share a voice that is yours, or that you have permission to share.",
+  "share.needVoice": "Attach a sample or describe the voice first",
+  "share.export": "Export…",
+  "share.exporting": "Exporting…",
+
+  // ---- Importing a character ----
+  "import.title": "Import this character?",
+  "import.voice.preset": "Uses the preset voice {voice}.",
+  "import.voice.description": "A voice will be designed from this description:",
+  "import.voice.audio": "A voice will be cloned from this sample:",
+  "import.voice.account":
+    "This creates a new custom voice in your DashScope account.",
+  "import.trust":
+    "The persona is handed to the AI as instructions for how to behave — only import characters from people you trust.",
+  "import.confirm": "Import",
+  "import.makingVoice": "Making the voice… {seconds}s",
+  "import.workingHint": "This can take up to a minute",
 
   // ---- Avatars ----
   "avatar.label": "Avatar",
@@ -234,9 +279,10 @@ export const en = {
   "voice.clone.useRecording": "Clone from this recording",
   "voice.clone.fileHint":
     "Or pick a local audio file (10–20 seconds of clear speech).",
-  "voice.clone.chooseFile": "Choose a file…",
+  "voice.clone.chooseFile": "Choose an audio file…",
   "voice.clone.useFile": "Clone from this file",
   "voice.clone.readFailed": "Couldn't read that file",
+  "voice.clone.tooLarge": "That file is over {mb} MB",
   "voice.design.promptLabel":
     "Voice description (Chinese or English only, 500 characters max)",
   "voice.design.promptPlaceholder":
@@ -366,5 +412,5 @@ export const en = {
     "Used by character “{name}”, so it can't be deleted",
   "settings.voices.deleteTitle": "Delete this voice?",
   "settings.voices.deleteBody":
-    "{id} will be permanently deleted from your DashScope account and cannot be recovered; using it again would mean recording or designing it from scratch.",
+    "{id} will be permanently deleted from your DashScope account, along with the audio sample kept for it on this device, and cannot be recovered; using it again would mean recording or designing it from scratch.",
 } as const;

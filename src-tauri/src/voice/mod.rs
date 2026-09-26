@@ -1,4 +1,5 @@
 pub mod clone;
+pub mod sample;
 pub mod service;
 
 /// Turns arbitrary user text (e.g. a character name) into a short,

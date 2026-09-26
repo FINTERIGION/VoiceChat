@@ -101,6 +101,7 @@ export interface PersonaPolish {
 }
 
 export interface DesignPreviewResult {
+  /** The TTS-series voice the preview enrolled; see `discardDesignPreviews`. */
   tts_voice: string | null;
   preview_audio_data_uri: string;
 }
@@ -165,6 +166,31 @@ export interface SubtitleTranslationEvent {
   id: number;
   index: number;
   text: string;
+}
+
+/**
+ * What a shared character's voice is made from on the recipient's side —
+ * see `store::share` for why it isn't just a voice id.
+ */
+export type SharedVoice =
+  | { kind: "preset"; id: string }
+  | { kind: "description"; prompt: string; preview_text?: string | null }
+  /** A `data:` URL. */
+  | { kind: "audio"; data: string };
+
+/** A character as a file for someone else to import. */
+export interface SharedCharacter {
+  format: string;
+  version: number;
+  name: string;
+  language: Language;
+  persona: string;
+  speech_habits: string;
+  /** A `data:` URL, when the sender included the picture. */
+  avatar?: string | null;
+  voice: SharedVoice;
+  memory_enabled?: boolean | null;
+  max_history_turns?: number | null;
 }
 
 export interface BackupImportSummary {

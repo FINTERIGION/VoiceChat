@@ -3,19 +3,23 @@ import {
   ArrowRight,
   Brain,
   Camera,
+  Import,
   MessageCircle,
   Pencil,
   Plus,
+  Share2,
   Trash2,
 } from "lucide-react";
 import Avatar from "../components/Avatar";
 import AvatarDialog from "../components/AvatarDialog";
 import ConfirmDialog from "../components/ConfirmDialog";
+import ImportCharacterDialog from "../components/ImportCharacterDialog";
+import ShareCharacterDialog from "../components/ShareCharacterDialog";
 import { formatRelative } from "../lib/format";
 import { useI18n } from "../lib/i18n";
 import { ipc } from "../lib/ipc";
 import { describeVoice, LANGUAGE_LABEL } from "../lib/labels";
-import type { Character } from "../lib/types";
+import type { Character, SharedCharacter } from "../lib/types";
 import { btn, interactive } from "../lib/ui";
 
 /** What the detail pane says about a character beyond its own fields. */
@@ -63,6 +67,11 @@ export default function CharacterList({
   const [pendingDelete, setPendingDelete] = useState<Character | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [avatarFor, setAvatarFor] = useState<Character | null>(null);
+  const [sharing, setSharing] = useState<Character | null>(null);
+  // A file picked and checked, waiting for the user to confirm the import.
+  const [importing, setImporting] = useState<SharedCharacter | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
@@ -166,6 +175,34 @@ export default function CharacterList({
     }
   }
 
+  // "Exported to …" is about the character it was said beside.
+  useEffect(() => {
+    setNotice(null);
+  }, [selectedId]);
+
+  async function handleOpenFile() {
+    setOpening(true);
+    setError(null);
+    setNotice(null);
+    try {
+      // `null` is the picker dismissed.
+      const shared = await ipc.openCharacterFile();
+      if (shared) setImporting(shared);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  async function handleImported(created: Character) {
+    setImporting(null);
+    await refresh();
+    // Shown, not switched to: importing shouldn't end the conversation in
+    // progress.
+    onSelect(created.id);
+  }
+
   async function applyAvatar(c: Character, avatarPath: string) {
     const updated = await ipc.setCharacterAvatar(c.id, avatarPath);
     setCharacters((all) => all.map((x) => (x.id === updated.id ? updated : x)));
@@ -197,13 +234,22 @@ export default function CharacterList({
     <div className="flex h-full text-neutral-100">
       {/* Wide enough for a name at `character::NAME_MAX_WIDTH` beside its avatar. */}
       <aside className="flex w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950">
-        <div className="px-3 pt-4">
+        <div className="flex gap-2 px-3 pt-4">
           <button
             onClick={() => onEdit("new")}
-            className={`${btn.outline} w-full gap-1.5 py-2 text-sm`}
+            className={`${btn.outline} min-w-0 flex-1 gap-1.5 py-2 text-sm`}
           >
-            <Plus className="size-4" />
-            {t("characters.new")}
+            <Plus className="size-4 shrink-0" />
+            <span className="truncate">{t("characters.new")}</span>
+          </button>
+          <button
+            onClick={handleOpenFile}
+            disabled={opening}
+            title={t("characters.importTitle")}
+            className={`${btn.outline} shrink-0 gap-1.5 px-3 py-2 text-sm`}
+          >
+            <Import className="size-4" />
+            {t("characters.import")}
           </button>
         </div>
         <h2 className="px-4 pt-3.5 pb-2 text-xs font-medium tracking-wide text-neutral-500 uppercase">
@@ -276,6 +322,14 @@ export default function CharacterList({
             {error}
           </p>
         )}
+        {notice && (
+          <p
+            role="status"
+            className="mx-6 mt-6 rounded-lg bg-emerald-500/10 px-3 py-2 text-sm break-all text-emerald-400"
+          >
+            {notice}
+          </p>
+        )}
         {selected && (
           <Detail
             character={selected}
@@ -288,10 +342,33 @@ export default function CharacterList({
             onEdit={() => onEdit(selected.id)}
             onViewMemory={() => onViewMemory(selected.id, selected.name)}
             onChangeAvatar={() => setAvatarFor(selected)}
+            onShare={() => {
+              setNotice(null);
+              setSharing(selected);
+            }}
             onDelete={() => setPendingDelete(selected)}
           />
         )}
       </section>
+
+      {sharing && (
+        <ShareCharacterDialog
+          character={sharing}
+          onExported={(path) => {
+            setSharing(null);
+            setNotice(t("characters.shared", { path }));
+          }}
+          onClose={() => setSharing(null)}
+        />
+      )}
+
+      {importing && (
+        <ImportCharacterDialog
+          shared={importing}
+          onImported={handleImported}
+          onClose={() => setImporting(null)}
+        />
+      )}
 
       {avatarFor && (
         <AvatarDialog
@@ -326,6 +403,7 @@ function Detail({
   onEdit,
   onViewMemory,
   onChangeAvatar,
+  onShare,
   onDelete,
 }: {
   character: Character;
@@ -338,6 +416,7 @@ function Detail({
   onEdit: () => void;
   onViewMemory: () => void;
   onChangeAvatar: () => void;
+  onShare: () => void;
   onDelete: () => void;
 }) {
   const { t } = useI18n();
@@ -412,6 +491,14 @@ function Detail({
             >
               <Brain className="size-3.5" />
               {t("characters.memory")}
+            </button>
+            <button
+              onClick={onShare}
+              title={t("characters.shareTitle")}
+              className={`${btn.outline} gap-1.5 px-3 py-1.5 text-sm`}
+            >
+              <Share2 className="size-3.5" />
+              {t("characters.share")}
             </button>
             {/* Set apart from the everyday actions, and quieter than them. */}
             <button

@@ -18,6 +18,9 @@
 //! Cloned and designed voices aren't in here: those live in the DashScope
 //! account, so a character keeps its own voice on the new machine as long as
 //! the same key is configured there — which, now, the backup does itself.
+//! The audio each one was cloned from is (`voice_samples`), since that is
+//! kept on this device (see `crate::voice::sample`) and is what sharing a
+//! character hands over.
 //!
 //! Avatars are, as base64 inside each character (`avatar_data`): they are
 //! files on this device (see `crate::avatar`), and a file name alone would
@@ -30,7 +33,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::avatar;
-use crate::store::{character, db, memory};
+use crate::store::{character, db, memory, voice_sample};
+use crate::voice::sample;
 
 /// Stamped into every file and checked on the way back in, so picking the
 /// wrong JSON file fails with "this isn't a backup" instead of importing
@@ -72,6 +76,9 @@ mod limits {
     pub const PATH_CHARS: usize = 4_096;
     /// An avatar at the largest size `avatar::save` accepts, base64-encoded.
     pub const AVATAR_DATA_CHARS: usize = (crate::avatar::MAX_BYTES / 3 + 1) * 4;
+    /// Likewise a voice sample at the largest size `voice::sample::save`
+    /// accepts.
+    pub const SAMPLE_DATA_CHARS: usize = (crate::voice::sample::MAX_BYTES / 3 + 1) * 4;
     pub const VOICE_ID_CHARS: usize = 200;
     /// Covers `persona`, `speech_habits`, `voice_prompt` and memory content.
     pub const PROSE_CHARS: usize = 20_000;
@@ -96,7 +103,7 @@ mod limits {
 /// and `role` decides who a transcript line is attributed to when a
 /// conversation is summarized — so a value outside the set is a file that
 /// would drive this app somewhere its own UI cannot.
-const LANGUAGES: &[&str] = &["zh", "ja", "en", "auto"];
+pub(crate) const LANGUAGES: &[&str] = &["zh", "ja", "en", "auto"];
 const VOICE_KINDS: &[&str] = &["preset", "designed", "cloned"];
 const MEMORY_KINDS: &[&str] = &["profile", "fact", "summary", "open_loop"];
 const MESSAGE_ROLES: &[&str] = &["user", "assistant"];
@@ -169,6 +176,27 @@ fn check_avatar(data: &str) -> Check {
     Ok(())
 }
 
+/// Like `check_avatar`, so `Backup::unpack_voice_samples` can't fail on the
+/// file's contents half way through.
+fn check_sample(data: &str) -> Check {
+    if data.len() > limits::SAMPLE_DATA_CHARS {
+        return Err(reject(crate::tr!(
+            "a voice sample is larger than allowed".to_string(),
+            "其中的音色样本超出了大小上限".to_string(),
+        )));
+    }
+    let is_audio = avatar::decode(data)
+        .ok()
+        .is_some_and(|bytes| sample::Format::sniff(&bytes).is_some());
+    if !is_audio {
+        return Err(reject(crate::tr!(
+            format!("a voice sample isn't a {} recording", sample::names()),
+            format!("其中的音色样本不是 {} 音频", sample::names()),
+        )));
+    }
+    Ok(())
+}
+
 fn at_most<T>(items: &[T], max: usize, field: &str) -> Check {
     if items.len() > max {
         return Err(reject(crate::tr!(
@@ -199,6 +227,27 @@ pub struct Backup {
     /// existed; either way the restoring device keeps the settings it has.
     #[serde(default)]
     pub settings: Option<BackupSettings>,
+    /// The kept sample of each custom voice a character uses. Absent from
+    /// files written before samples were kept; an older build reading a
+    /// newer file ignores it, and its characters keep their voices — only
+    /// sharing one from there asks for the audio again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voice_samples: Vec<BackupVoiceSample>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupVoiceSample {
+    pub voice_id: String,
+    /// The audio, base64-encoded like `avatar_data`. `None` until
+    /// `Backup::embed_voice_samples` has read it, and dropped by then if it
+    /// couldn't be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// The file the sample is in on this device: where `export` found it, or
+    /// where `unpack_voice_samples` wrote it for `import` to point at. Never
+    /// in the file, where it would name nothing.
+    #[serde(skip)]
+    pub file_name: Option<String>,
 }
 
 /// What the app needs to know to be usable on the other machine without a
@@ -383,6 +432,33 @@ impl Backup {
         Ok(())
     }
 
+    /// Puts each voice sample `export` found into the file, read from `dir`,
+    /// dropping any whose file has gone.
+    pub fn embed_voice_samples(&mut self, dir: &Path) {
+        for s in &mut self.voice_samples {
+            s.data = s
+                .file_name
+                .as_deref()
+                .and_then(|name| sample::read(dir, name))
+                .map(|(bytes, _)| avatar::encode(&bytes));
+        }
+        self.voice_samples.retain(|s| s.data.is_some());
+    }
+
+    /// Writes the samples the file carries into `dir`, ready for `import` to
+    /// record against their voices. Call after `validate`, which vouches for
+    /// them being audio. The files a restored sample replaces are left for
+    /// the next launch's sweep.
+    pub fn unpack_voice_samples(&mut self, dir: &Path) -> Result<(), String> {
+        for s in &mut self.voice_samples {
+            s.file_name = match s.data.take() {
+                Some(data) => Some(sample::save(dir, &avatar::decode(&data)?)?),
+                None => None,
+            };
+        }
+        Ok(())
+    }
+
     /// Rejects a file this build can't be trusted to restore, before any of
     /// it reaches the database.
     pub fn check_compatible(&self) -> Result<(), String> {
@@ -535,6 +611,15 @@ impl Backup {
                         "a message's created_at",
                     )?;
                 }
+            }
+        }
+
+        // One per character's voice at most, in a file this app wrote.
+        at_most(&self.voice_samples, limits::CHARACTERS, "voice samples")?;
+        for s in &self.voice_samples {
+            required(&s.voice_id, limits::VOICE_ID_CHARS, "a voice sample's voice_id")?;
+            if let Some(data) = &s.data {
+                check_sample(data)?;
             }
         }
 
@@ -691,7 +776,22 @@ fn export_settings(conn: &Connection, api_key: Option<String>) -> rusqlite::Resu
 /// something only the caller knows.
 pub fn export(conn: &Connection, api_key: Option<String>) -> rusqlite::Result<Backup> {
     let mut characters = Vec::new();
+    let mut voice_samples: Vec<BackupVoiceSample> = Vec::new();
     for c in character::list(conn)? {
+        // Only the voices characters use: the rest of the account's voices
+        // aren't anyone's to share from the other machine, and a sample can
+        // run to megabytes. A preset voice has no sample, and never a row.
+        if let Some(voice_id) = c.voice_id.as_deref().filter(|_| c.voice_kind != "preset") {
+            if !voice_samples.iter().any(|s| s.voice_id == voice_id) {
+                if let Some(file_name) = voice_sample::get(conn, voice_id)? {
+                    voice_samples.push(BackupVoiceSample {
+                        voice_id: voice_id.to_string(),
+                        data: None,
+                        file_name: Some(file_name),
+                    });
+                }
+            }
+        }
         characters.push(BackupCharacter {
             memories: export_memories(conn, &c.id)?,
             conversations: export_conversations(conn, &c.id)?,
@@ -718,6 +818,7 @@ pub fn export(conn: &Connection, api_key: Option<String>) -> rusqlite::Result<Ba
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         characters,
         settings: Some(export_settings(conn, api_key)?),
+        voice_samples,
     })
 }
 
@@ -855,6 +956,14 @@ pub fn import(conn: &mut Connection, backup: &Backup) -> rusqlite::Result<Import
                     ],
                 )?;
             }
+        }
+    }
+
+    // Samples `unpack_voice_samples` wrote out. The file wins over a sample
+    // this device already had for the voice, as it does for everything else.
+    for s in &backup.voice_samples {
+        if let Some(file_name) = &s.file_name {
+            voice_sample::set(&tx, &s.voice_id, file_name)?;
         }
     }
 
@@ -1294,6 +1403,7 @@ mod tests {
                 vad_silence_ms: Some(800),
                 ui_language: Some("zh-CN".into()),
             }),
+            voice_samples: Vec::new(),
         }
     }
 
@@ -1404,6 +1514,58 @@ mod tests {
         );
     }
 
+    /// What makes sharing from the restored device as easy as from this one.
+    #[test]
+    fn voice_samples_travel_inside_the_file() {
+        const WAV: &[u8] = b"RIFF\x24\0\0\0WAVEfmt ";
+        let from_dir = TempDir::new();
+        let to_dir = TempDir::new();
+
+        let source = TempDb::new();
+        let id = seed(&source.conn);
+        let mut cloned = CharacterInput::default_new("Nia", "curious and warm", "");
+        cloned.voice_kind = "cloned".into();
+        cloned.voice_id = Some("qwen-voice-nia".into());
+        character::update(&source.conn, &id, cloned).expect("give it a cloned voice");
+        let name = sample::save(&from_dir.0, WAV).expect("save sample");
+        voice_sample::set(&source.conn, "qwen-voice-nia", &name).expect("record sample");
+        // A voice no character uses stays behind.
+        let unused = sample::save(&from_dir.0, WAV).expect("save sample");
+        voice_sample::set(&source.conn, "qwen-voice-unused", &unused).expect("record sample");
+
+        let mut exported = export(&source.conn, None).expect("export");
+        exported.embed_voice_samples(&from_dir.0);
+        let json = serde_json::to_string(&exported).expect("serialize");
+        assert!(!json.contains(&name), "a file name means nothing elsewhere");
+
+        let mut restored: Backup = serde_json::from_str(&json).expect("parse");
+        assert_eq!(restored.voice_samples.len(), 1);
+        restored.validate().expect("valid");
+        restored.unpack_voice_samples(&to_dir.0).expect("unpack");
+        let mut target = TempDb::new();
+        import(&mut target.conn, &restored).expect("import");
+
+        let landed = voice_sample::get(&target.conn, "qwen-voice-nia")
+            .expect("get")
+            .expect("the voice came with its sample");
+        assert_eq!(
+            sample::read(&to_dir.0, &landed).map(|(bytes, _)| bytes),
+            Some(WAV.to_vec())
+        );
+        assert_eq!(voice_sample::get(&target.conn, "qwen-voice-unused").expect("get"), None);
+    }
+
+    #[test]
+    fn rejects_a_voice_sample_that_isnt_audio() {
+        let mut b = valid_backup();
+        b.voice_samples.push(BackupVoiceSample {
+            voice_id: "v".into(),
+            data: Some(avatar::encode(b"\x89PNG\r\n\x1a\n")),
+            file_name: None,
+        });
+        assert!(b.validate().is_err());
+    }
+
     #[test]
     fn a_name_without_its_picture_is_dropped() {
         let dir = TempDir::new();
@@ -1433,6 +1595,7 @@ mod tests {
             app_version: String::new(),
             characters: Vec::new(),
             settings: None,
+            voice_samples: Vec::new(),
         };
         assert!(wrong.check_compatible().is_err());
 

@@ -72,8 +72,9 @@ impl VoiceListEntry {
 }
 
 pub struct DesignedVoicePreview {
-    /// The TTS-series voice id, kept around in case the preview needs
-    /// re-synthesizing to a longer clip before cloning it for realtime use.
+    /// The TTS-series voice the design enrolled. Of no use once the preview
+    /// audio is in hand, so callers delete it (see
+    /// `app::commands::discard_design_voice`).
     pub tts_voice: Option<String>,
     /// Base64 WAV audio — playable directly and usable as the clone source.
     pub preview_audio_b64: String,
@@ -200,18 +201,43 @@ impl VoiceService {
     /// which of them the live session can actually use. Doesn't include the
     /// built-in preset voices — those aren't account-scoped resources, just
     /// fixed names the realtime API accepts.
+    ///
+    /// Reads page after page until one comes back short: an account can pass
+    /// a single page's worth sooner than its owner might think, since Voice
+    /// Design left a TTS-series voice behind for every preview before the
+    /// app started deleting them.
     pub async fn list_voices(&self) -> Result<Vec<VoiceListEntry>, String> {
-        let output = self
-            .call(json!({
-                "model": "voice-enrollment",
-                "input": {
-                    "action": "list_voice",
-                    "page_index": 0,
-                    "page_size": 100,
-                }
-            }))
-            .await?;
-        Ok(output.voice_list.unwrap_or_default())
+        const PAGE_SIZE: usize = 100;
+        /// Far past any real account. Only there so an API that ignored
+        /// `page_index` and kept sending the same full page couldn't keep
+        /// this asking forever.
+        const MAX_PAGES: usize = 50;
+
+        let mut voices: Vec<VoiceListEntry> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page_index in 0..MAX_PAGES {
+            let page = self
+                .call(json!({
+                    "model": "voice-enrollment",
+                    "input": {
+                        "action": "list_voice",
+                        "page_index": page_index,
+                        "page_size": PAGE_SIZE,
+                    }
+                }))
+                .await?
+                .voice_list
+                .unwrap_or_default();
+            let full = page.len() >= PAGE_SIZE;
+            let before = voices.len();
+            // A voice created while paging shifts the rest along by one, so
+            // the next page can repeat the last entry of this one.
+            voices.extend(page.into_iter().filter(|v| seen.insert(v.voice_id.clone())));
+            if !full || voices.len() == before {
+                break;
+            }
+        }
+        Ok(voices)
     }
 
     pub async fn delete_voice(&self, voice_id: &str) -> Result<(), String> {

@@ -15,6 +15,8 @@ import type {
   PersonaPolish,
   RegionOption,
   SecretStatus,
+  SharedCharacter,
+  SharedVoice,
   SubtitleLineEvent,
   SubtitleSettings,
   SubtitleTranslationEvent,
@@ -98,14 +100,27 @@ export const ipc = {
   listPresetVoices: () => invoke<string[]>("list_preset_voices"),
   startRecording: () => invoke<void>("start_recording"),
   stopRecording: () => invoke<string>("stop_recording"),
+  /** Also keeps the audio as the new voice's sample, for sharing later. */
   cloneVoice: (prefix: string, audioUrl: string) =>
     invoke<string>("clone_voice", { prefix, audioUrl }),
+  /**
+   * The audio a custom voice was cloned from, as a `data:` URL — `null` for
+   * a voice cloned before samples were kept, or outside this app.
+   */
+  getVoiceSample: (voiceId: string) =>
+    invoke<string | null>("get_voice_sample", { voiceId }),
   designVoicePreview: (voicePrompt: string, previewText: string, prefix: string) =>
     invoke<DesignPreviewResult>("design_voice_preview", {
       voicePrompt,
       previewText,
       prefix,
     }),
+  /**
+   * Deletes the TTS-series voices previews enrolled (`tts_voice`), once
+   * nothing needs them. Failures are only logged on the Rust side.
+   */
+  discardDesignPreviews: (voiceIds: string[]) =>
+    invoke<void>("discard_design_previews", { voiceIds }),
   slugify: (input: string) => invoke<string>("slugify", { input }),
 
   listVoices: () => invoke<ManagedVoice[]>("list_voices"),
@@ -122,6 +137,25 @@ export const ipc = {
   exportBackup: (includeApiKey: boolean) =>
     invoke<BackupExport | null>("export_backup", { includeApiKey }),
   importBackup: () => invoke<BackupImportSummary | null>("import_backup"),
+
+  /**
+   * Writes one character to a file for someone else to import, resolving
+   * to where it went — or `null` if the save dialog was dismissed.
+   */
+  exportCharacter: (id: string, includeAvatar: boolean, voice: SharedVoice) =>
+    invoke<string | null>("export_character", { id, includeAvatar, voice }),
+  /**
+   * Picks a shared character file and resolves to its checked contents,
+   * creating nothing yet; `null` if the picker was dismissed.
+   */
+  openCharacterFile: () =>
+    invoke<SharedCharacter | null>("open_character_file"),
+  /**
+   * Makes the voice under this user's account, then creates the character.
+   * Can take a while when the voice has to be designed or cloned.
+   */
+  importCharacter: (character: SharedCharacter) =>
+    invoke<Character>("import_character", { character }),
 };
 
 export function onChatState(

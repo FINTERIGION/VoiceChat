@@ -6,22 +6,17 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
-import {
-  Mic,
-  RefreshCw,
-  Sparkles,
-  Square,
-  Upload,
-  X,
-} from "lucide-react";
+import { RefreshCw, Sparkles, Upload, X } from "lucide-react";
 import Field from "../components/Field";
 import Modal from "../components/Modal";
+import RecordButton from "../components/RecordButton";
 import { useI18n, useT, type MessageKey } from "../lib/i18n";
 import { ipc } from "../lib/ipc";
 import { formatDateTime } from "../lib/format";
 import { PRESET_VOICE_INFO } from "../lib/labels";
+import { SAMPLE_ACCEPT, SAMPLE_MAX_BYTES } from "../lib/sample";
 import type { ManagedVoice, VoiceKind } from "../lib/types";
-import { btn, btnBase, cardBtn, field, hoverGlow, tabBtn } from "../lib/ui";
+import { btn, cardBtn, field, tabBtn } from "../lib/ui";
 
 export interface VoiceSelection {
   voice_kind: VoiceKind;
@@ -30,9 +25,6 @@ export interface VoiceSelection {
 }
 
 type Tab = "preset" | "cloud" | "clone" | "design";
-
-/** Matches `MAX_RECORD_SECS` in `voice/clone.rs`, past which nothing is kept. */
-const MAX_RECORD_SECS = 60;
 
 export default function VoiceStudio({
   characterName,
@@ -304,77 +296,11 @@ function CloneTab({
   onSelect: (sel: VoiceSelection) => void;
 }) {
   const t = useT();
-  const [recording, setRecording] = useState(false);
   const [dataUri, setDataUri] = useState<string | null>(null);
   const [fileUri, setFileUri] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
-  const [elapsed, setElapsed] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Read by the unmount cleanup, which must not re-run on every change.
-  const recordingRef = useRef(false);
-  // Set while `stopRecording` is in flight, so the timer hitting the cap and
-  // a click on the button can't both stop the same recording.
-  const stopping = useRef(false);
-
-  useEffect(() => {
-    recordingRef.current = recording;
-    if (!recording) return;
-    const started = Date.now();
-    setElapsed(0);
-    const timer = window.setInterval(
-      () => setElapsed(Math.floor((Date.now() - started) / 1000)),
-      250,
-    );
-    return () => window.clearInterval(timer);
-  }, [recording]);
-
-  // The backend keeps nothing past the cap, so carrying on would only look
-  // like it is still listening.
-  useEffect(() => {
-    if (recording && elapsed >= MAX_RECORD_SECS) void stopRecording();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recording, elapsed]);
-
-  // Closing the studio, or leaving this tab, mid-recording must not leave the
-  // microphone capturing with nothing left on screen to stop it.
-  useEffect(
-    () => () => {
-      if (recordingRef.current && !stopping.current) {
-        ipc.stopRecording().catch(() => {});
-      }
-    },
-    [],
-  );
-
-  async function stopRecording() {
-    if (stopping.current) return;
-    stopping.current = true;
-    try {
-      const uri = await ipc.stopRecording();
-      setDataUri(uri);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      stopping.current = false;
-      setRecording(false);
-    }
-  }
-
-  async function toggleRecording() {
-    setError(null);
-    if (!recording) {
-      try {
-        await ipc.startRecording();
-        setRecording(true);
-        setDataUri(null);
-      } catch (e) {
-        setError(String(e));
-      }
-    } else {
-      await stopRecording();
-    }
-  }
 
   async function cloneFrom(url: string) {
     setBusy(true);
@@ -392,8 +318,14 @@ function CloneTab({
 
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    // Cleared so picking the same file again after an error still fires.
+    e.target.value = "";
     if (!file) return;
     setError(null);
+    if (file.size > SAMPLE_MAX_BYTES) {
+      setError(t("voice.clone.tooLarge", { mb: SAMPLE_MAX_BYTES / 1_048_576 }));
+      return;
+    }
     setFileName(file.name);
     setFileUri(null);
     const reader = new FileReader();
@@ -406,26 +338,15 @@ function CloneTab({
     <div className="space-y-5">
       <div className="space-y-2">
         <p className="text-sm text-neutral-400">{t("voice.clone.recordHint")}</p>
-        <button
-          onClick={toggleRecording}
-          className={`${btnBase} ${hoverGlow} w-full gap-2 rounded-lg py-2.5 text-sm font-medium ${
-            recording
-              ? "bg-red-500 text-neutral-950 hover:bg-red-400 hover:shadow-red-500/25"
-              : "bg-neutral-800 text-neutral-100 hover:bg-neutral-700 hover:shadow-black/40"
-          }`}
-        >
-          {recording ? (
-            <Square className="size-3.5 fill-current" />
-          ) : (
-            <Mic className="size-4" />
-          )}
-          {recording
-            ? t("voice.clone.stop", {
-                elapsed: formatSeconds(elapsed),
-                max: formatSeconds(MAX_RECORD_SECS),
-              })
-            : t("voice.clone.start")}
-        </button>
+        <RecordButton
+          onStart={() => {
+            setError(null);
+            setDataUri(null);
+          }}
+          onRecorded={setDataUri}
+          onError={setError}
+          disabled={busy}
+        />
         {dataUri && (
           <div className="space-y-2">
             {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
@@ -454,7 +375,7 @@ function CloneTab({
           </span>
           <input
             type="file"
-            accept="audio/*"
+            accept={SAMPLE_ACCEPT}
             onChange={handleFileChange}
             className="sr-only"
           />
@@ -479,12 +400,6 @@ function CloneTab({
   );
 }
 
-/** `75` → `1:15`. */
-function formatSeconds(total: number): string {
-  const s = Math.min(total, MAX_RECORD_SECS);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
 /** The sample length the design label recommends — enough for ~15 s. */
 const PREVIEW_TEXT_MIN = 150;
 
@@ -501,6 +416,29 @@ function DesignTab({
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The TTS-series voice each preview enrolled. None is needed once its
+  // audio is here — the realtime voice is cloned from that — so they all go
+  // once a voice is made, or the tab is left without one.
+  const previewVoices = useRef<string[]>([]);
+  const mounted = useRef(true);
+
+  function discardPreviews() {
+    const ids = previewVoices.current.splice(0);
+    if (ids.length === 0) return;
+    ipc.discardDesignPreviews(ids).catch((e) => {
+      console.error("couldn't delete the preview voices", e);
+    });
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      discardPreviews();
+    };
+    // Only refs are read, so the first render's copy is as good as any.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function generatePreview() {
     setBusy(true);
@@ -509,6 +447,9 @@ function DesignTab({
     try {
       const prefix = await ipc.slugify(characterName);
       const result = await ipc.designVoicePreview(prompt, previewText, prefix);
+      if (result.tts_voice) previewVoices.current.push(result.tts_voice);
+      // Closed while it was being made: no one is left to use it.
+      if (!mounted.current) discardPreviews();
       setPreviewUri(result.preview_audio_data_uri);
     } catch (e) {
       setError(String(e));
@@ -524,6 +465,7 @@ function DesignTab({
     try {
       const prefix = await ipc.slugify(characterName);
       const voiceId = await ipc.cloneVoice(prefix, previewUri);
+      discardPreviews();
       onSelect({ voice_kind: "designed", voice_id: voiceId, voice_prompt: prompt });
     } catch (e) {
       setError(String(e));

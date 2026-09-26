@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -10,7 +10,8 @@ use crate::avatar::{self, generate::ImageClient};
 use crate::i18n::{self, Lang};
 use crate::llm::flash::FlashClient;
 use crate::secrets::{self, SecretStatus};
-use crate::store::{backup, character, db, memory, message};
+use crate::store::share::{SharedCharacter, SharedVoice};
+use crate::store::{self, backup, character, db, memory, message, share};
 use crate::subtitle;
 use crate::voice::{self, service::VoiceService};
 
@@ -60,11 +61,22 @@ pub fn get_ui_language(state: State<AppState>) -> Result<String, String> {
 /// strings (command errors, session error states, region labels) switch over
 /// with the rest of the UI instead of only after a restart.
 #[tauri::command]
-pub fn set_ui_language(state: State<AppState>, language: String) -> Result<(), String> {
+pub fn set_ui_language(
+    app: AppHandle,
+    state: State<AppState>,
+    language: String,
+) -> Result<(), String> {
     let lang = Lang::from_tag(&language);
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "ui_language", lang.tag()).map_err(|e| e.to_string())?;
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "ui_language", lang.tag()).map_err(|e| e.to_string())?;
+    }
     i18n::set(lang);
+    // The tray menu is the one piece of backend UI that's on screen
+    // persistently, so it's relabelled now rather than on next launch.
+    if let Err(e) = crate::tray::refresh_language(&app) {
+        tracing::error!("failed to relabel tray menu: {e}");
+    }
     Ok(())
 }
 
@@ -693,19 +705,72 @@ pub fn stop_recording(state: State<AppState>) -> Result<String, String> {
     handle.stop_and_encode()
 }
 
+/// Keeps `sample_url` — the `data:` URL a voice was just cloned from — as
+/// that voice's sample, so a character using it can later be shared without
+/// the user supplying the audio again (see `voice::sample`).
+///
+/// Never fails the clone: the voice already exists in the account by now,
+/// and a sample that can't be kept (a public URL, a format or size sharing
+/// wouldn't take, a disk error) only means sharing will ask for one.
+fn keep_sample(state: &AppState, voice_id: &str, sample_url: &str) {
+    let Some(bytes) = voice::sample::from_data_url(sample_url) else {
+        tracing::info!("not keeping the sample for {voice_id}: it isn't one sharing can use");
+        return;
+    };
+    let kept = voice::sample::save(&state.voice_samples_dir, &bytes).and_then(|name| {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        match store::voice_sample::set(&conn, voice_id, &name) {
+            Ok(replaced) => Ok(replaced),
+            Err(e) => {
+                voice::sample::remove(&state.voice_samples_dir, &name);
+                Err(e.to_string())
+            }
+        }
+    });
+    match kept {
+        Ok(Some(replaced)) => voice::sample::remove(&state.voice_samples_dir, &replaced),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("couldn't keep the sample for {voice_id}: {e}"),
+    }
+}
+
+/// Clones a voice for the realtime model from `audio_url` — a recording, a
+/// picked file, or a designed voice's preview — and keeps the audio as the
+/// new voice's sample.
 #[tauri::command]
 pub async fn clone_voice(
     state: State<'_, AppState>,
     prefix: String,
     audio_url: String,
 ) -> Result<String, String> {
-    voice_service(&state)?
+    let voice_id = voice_service(&state)?
         .clone_voice(voice::service::REALTIME_TARGET_MODEL, &prefix, &audio_url)
-        .await
+        .await?;
+    keep_sample(&state, &voice_id, &audio_url);
+    Ok(voice_id)
+}
+
+/// The audio `voice_id` was cloned from, as a `data:` URL, if it was kept —
+/// voices cloned before samples were, or somewhere other than this app,
+/// have none.
+#[tauri::command]
+pub fn get_voice_sample(
+    state: State<AppState>,
+    voice_id: String,
+) -> Result<Option<String>, String> {
+    let name = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        store::voice_sample::get(&conn, &voice_id).map_err(|e| e.to_string())?
+    };
+    Ok(name
+        .and_then(|name| voice::sample::read(&state.voice_samples_dir, &name))
+        .map(|(bytes, format)| voice::sample::to_data_url(&bytes, format)))
 }
 
 #[derive(Serialize)]
 pub struct DesignPreviewResult {
+    /// The TTS-series voice this preview enrolled, for the design tab to
+    /// hand to `discard_design_previews` once it is done with it.
     pub tts_voice: Option<String>,
     pub preview_audio_data_uri: String,
 }
@@ -726,6 +791,40 @@ pub async fn design_voice_preview(
     })
 }
 
+/// Deletes a TTS-series voice Voice Design enrolled. Nothing needs one once
+/// its preview audio is in hand: the realtime voice is cloned from the
+/// audio, and the live session can't speak with a TTS-series voice at all.
+///
+/// Failing to is only logged. What it leaves is a voice the cloud tab lists
+/// as unusable, not anything a character depends on.
+async fn discard_design_voice(service: &VoiceService, voice_id: &str) {
+    if let Err(e) = service.delete_voice(voice_id).await {
+        tracing::warn!("couldn't delete the design step's voice {voice_id}: {e}");
+    }
+}
+
+/// Deletes the voices the design tab's previews enrolled
+/// (`design_voice_preview`), once a voice has been made from one of them or
+/// the tab has been left without one.
+///
+/// Refuses anything shaped like a realtime voice — the only kind a character
+/// can speak with — so a wrong id from the frontend can't cost one.
+#[tauri::command]
+pub async fn discard_design_previews(
+    state: State<'_, AppState>,
+    voice_ids: Vec<String>,
+) -> Result<(), String> {
+    let service = voice_service(&state)?;
+    for id in &voice_ids {
+        if id.starts_with(voice::service::REALTIME_TARGET_MODEL) {
+            tracing::warn!("not discarding {id}: it's a realtime voice, not a design preview");
+            continue;
+        }
+        discard_design_voice(&service, id).await;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn slugify(input: String) -> String {
     voice::slugify(&input)
@@ -739,8 +838,9 @@ pub struct ManagedVoice {
     pub bound_character_id: Option<String>,
     pub bound_character_name: Option<String>,
     /// Whether the live session can speak with this voice. False for the
-    /// TTS-series voices an account also collects (the Voice Design flow
-    /// leaves one behind each time it runs).
+    /// TTS-series voices an account also collects: Voice Design enrolls one
+    /// for every preview, and ones it couldn't delete afterwards — or made
+    /// before it deleted them at all — stay behind.
     pub realtime_compatible: bool,
 }
 
@@ -787,7 +887,18 @@ pub async fn delete_voice(state: State<'_, AppState>, voice_id: String) -> Resul
             format!("音色仍绑定在角色「{name}」上，请先在该角色里更换音色再删除"),
         ));
     }
-    voice_service(&state)?.delete_voice(&voice_id).await
+    voice_service(&state)?.delete_voice(&voice_id).await?;
+
+    // Only once the voice is really gone: while it exists, its sample is
+    // what lets a character using it be shared.
+    let sample = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        store::voice_sample::delete(&conn, &voice_id).map_err(|e| e.to_string())?
+    };
+    if let Some(name) = sample {
+        voice::sample::remove(&state.voice_samples_dir, &name);
+    }
+    Ok(())
 }
 
 // ---- Backup ----
@@ -819,8 +930,31 @@ async fn chosen_path(
     file.into_path().map(Some).map_err(|e| e.to_string())
 }
 
+/// Reads a file the user picked as text, refusing one over `max_bytes`.
+///
+/// The size is checked before reading rather than after, because the whole
+/// file is held in memory twice over — once as text, once parsed — and the
+/// point of a cap is not to get that far. `too_large` gets the size in MB.
+fn read_picked(
+    path: &Path,
+    max_bytes: u64,
+    too_large: impl FnOnce(u64) -> String,
+) -> Result<String, String> {
+    let unreadable = |e: std::io::Error| {
+        crate::tr!(
+            format!("Couldn't read {}: {e}", path.display()),
+            format!("无法读取 {}：{e}", path.display()),
+        )
+    };
+    let size = std::fs::metadata(path).map_err(unreadable)?.len();
+    if size > max_bytes {
+        return Err(too_large(size / 1_048_576));
+    }
+    std::fs::read_to_string(path).map_err(unreadable)
+}
+
 /// Upper bound on a backup file, enforced by `import_backup` below.
-const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Serialize)]
 pub struct BackupExport {
@@ -856,6 +990,7 @@ pub async fn export_backup(
         backup::export(&conn, api_key).map_err(|e| e.to_string())?
     };
     payload.embed_avatars(&state.avatars_dir);
+    payload.embed_voice_samples(&state.voice_samples_dir);
     let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -917,38 +1052,20 @@ pub async fn import_backup(
         return Ok(None);
     };
 
-    // Checked before reading rather than after, because the whole file is
-    // held in memory twice over — once as text, once parsed — and the point
-    // of a cap is not to get that far. A real backup of a heavily used
-    // account is a few megabytes; this leaves two orders of magnitude of
-    // room and still refuses a file picked to exhaust memory.
-    let size = std::fs::metadata(&path)
-        .map_err(|e| {
-            crate::tr!(
-                format!("Couldn't read {}: {e}", path.display()),
-                format!("无法读取 {}：{e}", path.display()),
-            )
-        })?
-        .len();
-    if size > MAX_BACKUP_BYTES {
-        return Err(crate::tr!(
-            format!(
-                "That file is {} MB — too large to be a VoiceChat backup (the limit is {} MB)",
-                size / 1_048_576,
-                MAX_BACKUP_BYTES / 1_048_576
-            ),
-            format!(
-                "该文件有 {} MB，超出了 VoiceChat 备份的大小上限（{} MB）",
-                size / 1_048_576,
-                MAX_BACKUP_BYTES / 1_048_576
-            ),
-        ));
-    }
-
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
+    // A real backup is a few megabytes of text, plus a few more per
+    // character with a kept voice sample — tens of megabytes for someone
+    // with many cloned voices. The cap leaves several times that and still
+    // refuses a file picked to exhaust memory.
+    let raw = read_picked(&path, MAX_BACKUP_BYTES, |mb| {
         crate::tr!(
-            format!("Couldn't read {}: {e}", path.display()),
-            format!("无法读取 {}：{e}", path.display()),
+            format!(
+                "That file is {mb} MB — too large to be a VoiceChat backup (the limit is {} MB)",
+                MAX_BACKUP_BYTES / 1_048_576
+            ),
+            format!(
+                "该文件有 {mb} MB，超出了 VoiceChat 备份的大小上限（{} MB）",
+                MAX_BACKUP_BYTES / 1_048_576
+            ),
         )
     })?;
     let mut parsed: backup::Backup = serde_json::from_str(&raw).map_err(|e| {
@@ -963,6 +1080,7 @@ pub async fn import_backup(
     // can't be rolled back, but one the import then fails to reference is
     // just an orphan for the next launch's sweep.
     parsed.unpack_avatars(&state.avatars_dir)?;
+    parsed.unpack_voice_samples(&state.voice_samples_dir)?;
 
     let mut summary = {
         let mut conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -1044,4 +1162,228 @@ pub async fn import_backup(
         ));
     }
     Ok(Some(summary))
+}
+
+// ---- Sharing characters ----
+
+/// Like `backup_dialog`, filtered to shared character files instead.
+fn character_file_dialog(app: &AppHandle) -> tauri_plugin_dialog::FileDialogBuilder<tauri::Wry> {
+    let mut builder = app
+        .dialog()
+        .file()
+        .add_filter(crate::tr!("VoiceChat character", "VoiceChat 角色"), &["json"]);
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+    builder
+}
+
+/// Upper bound on a shared character file: room for the largest avatar and
+/// voice sample `share` accepts, base64-encoded, with plenty to spare.
+const MAX_CHARACTER_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The character's name as a file name, with what Windows won't allow in
+/// one swapped out.
+fn character_file_name(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let safe = safe.trim().trim_end_matches('.');
+    format!("{}.json", if safe.is_empty() { "character" } else { safe })
+}
+
+/// Writes one character — persona, speech habits, language, the avatar if
+/// `include_avatar`, and `voice` — to a file the user picks, for handing to
+/// someone else to import. Memories, conversations and settings stay here.
+///
+/// `voice` comes from the frontend rather than being read off the character,
+/// because the user may choose it: the dialog starts on the voice's kept
+/// sample (`get_voice_sample`), and asks for a recording or a description
+/// only when there is none — a voice cloned before samples were kept, say.
+///
+/// `Ok(None)` means the save dialog was dismissed.
+#[tauri::command]
+pub async fn export_character(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    include_avatar: bool,
+    voice: SharedVoice,
+) -> Result<Option<String>, String> {
+    let c = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        character::get(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| crate::tr!("Character not found", "角色不存在").to_string())?
+    };
+    let avatar = include_avatar
+        .then_some(c.avatar_path.as_deref())
+        .flatten()
+        .and_then(|name| avatar::read(&state.avatars_dir, name))
+        .map(|(bytes, format)| avatar::to_data_url(&bytes, format));
+    // Put through the same checks an import applies, so a file this writes
+    // is always one `import_character` will take — and a sample the user
+    // just attached that the recipient's copy couldn't be cloned from is
+    // caught here, while they can still pick another. The voice goes first,
+    // on its own: what's wrong there is the sample or description in the
+    // dialog, not a file, which doesn't exist yet.
+    let voice = voice.normalize().map_err(|why| {
+        crate::tr!(
+            format!("This voice can't be shared: {why}"),
+            format!("无法分享这个音色：{why}"),
+        )
+    })?;
+    let shared = SharedCharacter::from_character(&c, avatar, voice).normalize()?;
+    let json = serde_json::to_string_pretty(&shared).map_err(|e| e.to_string())?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    character_file_dialog(&app)
+        .set_title(crate::tr!("Share character", "分享角色"))
+        .set_file_name(character_file_name(&c.name))
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = chosen_path(rx).await? else {
+        return Ok(None);
+    };
+    // As in `export_backup`: not every platform dialog appends the filter's
+    // extension to a name typed without one.
+    let path = if path.extension().is_some() {
+        path
+    } else {
+        path.with_extension("json")
+    };
+
+    std::fs::write(&path, json).map_err(|e| {
+        crate::tr!(
+            format!("Couldn't write {}: {e}", path.display()),
+            format!("无法写入 {}：{e}", path.display()),
+        )
+    })?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Opens a shared character file and returns what is in it, checked, for the
+/// import dialog to show. Nothing is created yet: making the voice costs a
+/// request against the user's account and can take a while, so the user
+/// sees who they are importing before `import_character` does it.
+///
+/// `Ok(None)` means the picker was dismissed.
+#[tauri::command]
+pub async fn open_character_file(app: AppHandle) -> Result<Option<SharedCharacter>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    character_file_dialog(&app)
+        .set_title(crate::tr!("Import a character", "导入角色"))
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = chosen_path(rx).await? else {
+        return Ok(None);
+    };
+
+    let raw = read_picked(&path, MAX_CHARACTER_FILE_BYTES, |mb| {
+        crate::tr!(
+            format!(
+                "That file is {mb} MB — too large to be a VoiceChat character (the limit is {} MB)",
+                MAX_CHARACTER_FILE_BYTES / 1_048_576
+            ),
+            format!(
+                "该文件有 {mb} MB，超出了 VoiceChat 角色文件的大小上限（{} MB）",
+                MAX_CHARACTER_FILE_BYTES / 1_048_576
+            ),
+        )
+    })?;
+    SharedCharacter::parse(&raw)?.normalize().map(Some)
+}
+
+/// Creates a new character from a shared file's contents, as
+/// `open_character_file` returned them, making its voice under this user's
+/// own DashScope account on the way:
+///
+/// - a preset voice is used as it is;
+/// - a description is put through Voice Design, and the sample that comes
+///   back is cloned for the realtime model — the same two steps as the Voice
+///   Studio's design tab;
+/// - an audio sample is cloned directly, as in the clone tab.
+///
+/// The character is added alongside the others; the one being talked to
+/// stays current, so importing never interrupts a conversation.
+#[tauri::command]
+pub async fn import_character(
+    state: State<'_, AppState>,
+    character: SharedCharacter,
+) -> Result<character::Character, String> {
+    // Checked again rather than trusted for having been checked on the way
+    // out to the dialog: this is the call that acts on it.
+    let shared = character.normalize()?;
+
+    // Local first, then remote. A picture saved for an import that then
+    // fails is an orphan the next launch's sweep removes; a voice created in
+    // the user's account for one is not, so it is made only once everything
+    // on this side has worked.
+    let avatar_path = shared
+        .avatar_bytes()
+        .map(|bytes| avatar::save(&state.avatars_dir, &bytes))
+        .transpose()?;
+
+    let prefix = voice::slugify(&shared.name);
+    let (voice_kind, voice_id, voice_prompt) = match &shared.voice {
+        SharedVoice::Preset { id } => ("preset", id.clone(), None),
+        SharedVoice::Description {
+            prompt,
+            preview_text,
+        } => {
+            let service = voice_service(&state)?;
+            let preview_text = preview_text
+                .as_deref()
+                .unwrap_or_else(|| share::default_preview_text(&shared.language, prompt));
+            let preview = service.design_voice(prompt, preview_text, &prefix).await?;
+            let sample = format!("data:audio/wav;base64,{}", preview.preview_audio_b64);
+            let cloned = service
+                .clone_voice(voice::service::REALTIME_TARGET_MODEL, &prefix, &sample)
+                .await;
+            // Cloned from or not, the design step's voice was only ever
+            // needed to read the sample out.
+            if let Some(tts_voice) = &preview.tts_voice {
+                discard_design_voice(&service, tts_voice).await;
+            }
+            let id = cloned?;
+            keep_sample(&state, &id, &sample);
+            ("designed", id, Some(prompt.clone()))
+        }
+        SharedVoice::Audio { data } => {
+            let id = voice_service(&state)?
+                .clone_voice(voice::service::REALTIME_TARGET_MODEL, &prefix, data)
+                .await?;
+            // So the imported character can be passed on in turn.
+            keep_sample(&state, &id, data);
+            ("cloned", id, None)
+        }
+    };
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    character::create(
+        &conn,
+        character::CharacterInput {
+            name: shared.name,
+            avatar_path,
+            language: shared.language,
+            persona: shared.persona,
+            speech_habits: shared.speech_habits,
+            voice_kind: voice_kind.into(),
+            voice_id: Some(voice_id),
+            voice_prompt,
+            // The defaults a character made in the editor starts with.
+            memory_enabled: shared.memory_enabled.unwrap_or(true),
+            max_history_turns: shared.max_history_turns.unwrap_or(20),
+        },
+    )
+    .map_err(|e| e.to_string())
 }

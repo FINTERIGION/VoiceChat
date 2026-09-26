@@ -104,6 +104,46 @@ export const zhCN: Messages = {
   "characters.deleteLastTitle": "至少要保留一个角色，请先新建一个再删除这个",
   "characters.deleteTitle": "删除角色「{name}」？",
   "characters.deleteBody": "该角色的全部对话记录和长期记忆会一并删除，无法恢复。",
+  "characters.import": "导入",
+  "characters.importTitle": "导入别人分享给你的角色",
+  "characters.share": "分享",
+  "characters.shareTitle": "把这个角色导出为文件，别人可以直接导入",
+  "characters.shared": "已导出到 {path}",
+
+  // ---- Sharing a character ----
+  "share.title": "分享「{name}」",
+  "share.intro":
+    "把这个角色的人设、头像和声音导出为一个文件。对方导入后即可直接对话，音色会在对方自己的账户下重新生成。文件不含长期记忆、对话记录和 API key。",
+  "share.includeAvatar": "包含头像",
+  "share.voice": "声音",
+  "share.presetHint": "{voice}：预置音色，对方直接使用同一个音色。",
+  "share.clonedNote":
+    "本机没有保存这个音色的样本。请附上一段音频供对方复刻，或改用文字描述。",
+  "share.keptSample": "生成这个音色时使用的音频：",
+  "share.keptHint":
+    "对方会用同一段音频复刻，得到的音色和你的几乎一样。请只分享你本人或已获授权的声音。",
+  "share.replaceSample": "也可以换一段样本：",
+  "share.useKept": "改回已保存的样本",
+  "share.source.audio": "音频样本",
+  "share.source.description": "声音描述",
+  "share.descriptionHint": "对方会按这段描述重新设计音色，听起来相近，但不会完全一样。",
+  "share.chooseSample": "或选择音频文件…",
+  "share.audioHint":
+    "对方会用这段音频复刻音色，10–20 秒清晰人声效果最好。请只分享你本人或已获授权的声音。",
+  "share.needVoice": "请先附上音频样本或填写声音描述",
+  "share.export": "导出…",
+  "share.exporting": "导出中…",
+
+  // ---- Importing a character ----
+  "import.title": "导入这个角色？",
+  "import.voice.preset": "使用预置音色 {voice}。",
+  "import.voice.description": "将根据以下描述设计音色：",
+  "import.voice.audio": "将用以下音频样本复刻音色：",
+  "import.voice.account": "这会在你的 DashScope 账户中新建一个自定义音色。",
+  "import.trust": "人设会作为行为指令交给 AI，请只导入你信任的人分享的角色。",
+  "import.confirm": "导入",
+  "import.makingVoice": "正在生成音色… {seconds} 秒",
+  "import.workingHint": "可能需要一分钟左右",
 
   // ---- Avatars ----
   "avatar.label": "头像",
@@ -213,9 +253,10 @@ export const zhCN: Messages = {
   "voice.clone.cloning": "复刻中…",
   "voice.clone.useRecording": "使用此录音克隆",
   "voice.clone.fileHint": "或选择一段本地音频文件（10–20 秒清晰语音）。",
-  "voice.clone.chooseFile": "选择文件…",
+  "voice.clone.chooseFile": "选择音频文件…",
   "voice.clone.useFile": "使用此文件克隆",
   "voice.clone.readFailed": "读取文件失败",
+  "voice.clone.tooLarge": "文件超过了 {mb} MB",
   "voice.design.promptLabel": "音色描述（仅支持中/英文，≤500 字）",
   "voice.design.promptPlaceholder": "例如：温柔知性的女声，语速偏慢，略带鼻音",
   "voice.design.previewTextLabel": "试听文本（建议 150 字以上，够念满 15 秒）",
@@ -331,5 +372,5 @@ export const zhCN: Messages = {
   "settings.voices.boundTitle": "已绑定角色「{name}」，无法删除",
   "settings.voices.deleteTitle": "删除音色？",
   "settings.voices.deleteBody":
-    "{id} 会从你的 DashScope 账号中永久删除，无法恢复；如果之后还想用，需要重新录制或重新设计。",
+    "{id} 会从你的 DashScope 账号中永久删除，本机为它保存的音频样本也会一并删除，无法恢复；如果之后还想用，需要重新录制或重新设计。",
 };

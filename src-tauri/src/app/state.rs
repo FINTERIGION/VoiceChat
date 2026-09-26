@@ -12,4 +12,7 @@ pub struct AppState {
     pub recorder: Mutex<Option<RecorderHandle>>,
     /// Where character pictures live; see `avatar`.
     pub avatars_dir: PathBuf,
+    /// Where the audio each custom voice was cloned from lives; see
+    /// `voice::sample`.
+    pub voice_samples_dir: PathBuf,
 }

@@ -90,12 +90,17 @@ pub fn is_valid_name(name: &str) -> bool {
     let Some((stem, ext)) = name.split_once('.') else {
         return false;
     };
+    is_minted_stem(stem) && Format::from_ext(ext).is_some()
+}
+
+/// A lowercase hyphenated UUID and nothing else: the stem of every file name
+/// this app mints, here and for voice samples (`voice::sample`).
+pub(crate) fn is_minted_stem(stem: &str) -> bool {
     stem.len() == 36
         && stem
             .chars()
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c) || c == '-')
         && uuid::Uuid::parse_str(stem).is_ok()
-        && Format::from_ext(ext).is_some()
 }
 
 /// Stores a picture and returns the name to put in `avatar_path`.
