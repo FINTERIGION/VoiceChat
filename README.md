@@ -1,4 +1,4 @@
-# VoiceChat
+# Voice Chat
 
 A desktop app for real-time, hands-free voice conversations with customizable AI characters, built on [Tauri 2](https://tauri.app/) and Alibaba Cloud's [Model Studio](https://help.aliyun.com/zh/model-studio/) (DashScope) realtime audio API.
 

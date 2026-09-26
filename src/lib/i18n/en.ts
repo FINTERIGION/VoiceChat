@@ -14,7 +14,7 @@ export const en = {
   "nav.settings": "Settings",
 
   // ---- Update banner ----
-  "update.banner": "VoiceChat {version} is available.",
+  "update.banner": "Voice Chat {version} is available.",
   "update.view": "View update",
   "update.later": "Later",
 
@@ -59,7 +59,7 @@ export const en = {
   "chat.switchedNotice": "Your conversation with {name} has ended and is saved in their history",
 
   // ---- First run (no API key yet) ----
-  "onboarding.title": "Welcome to VoiceChat",
+  "onboarding.title": "Welcome to Voice Chat",
   "onboarding.body":
     "Before you can talk, the app needs an Alibaba Cloud Model Studio (DashScope) API key — speech recognition, the conversation and the voice all run through it.",
   "onboarding.step1": "Create an API key in the Model Studio console",

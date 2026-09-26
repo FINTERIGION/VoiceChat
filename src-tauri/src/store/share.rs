@@ -31,7 +31,7 @@ use crate::voice::{sample, service::PRESET_VOICES};
 /// Stamped into every file and checked on the way back in, so picking the
 /// wrong JSON file fails with "this isn't a character" rather than a
 /// complaint about some missing field.
-pub const FORMAT: &str = "voicechat-character";
+pub const FORMAT: &str = "voice-chat-character";
 
 /// Bumped only when the shape changes such that an older build would misread
 /// a newer file. Import accepts anything up to this.
@@ -272,8 +272,8 @@ impl SharedCharacter {
         }
         let header: Header = serde_json::from_str(raw).map_err(|e| {
             crate::tr!(
-                format!("This file isn't a readable VoiceChat character: {e}"),
-                format!("无法读取该 VoiceChat 角色文件：{e}"),
+                format!("This file isn't a readable Voice Chat character: {e}"),
+                format!("无法读取该 Voice Chat 角色文件：{e}"),
             )
         })?;
         if header.format == backup::FORMAT {
@@ -285,15 +285,15 @@ impl SharedCharacter {
         }
         if header.format != FORMAT {
             return Err(crate::tr!(
-                "This file isn't a VoiceChat character",
-                "这不是 VoiceChat 的角色文件",
+                "This file isn't a Voice Chat character",
+                "这不是 Voice Chat 的角色文件",
             )
             .into());
         }
         serde_json::from_str(raw).map_err(|e| {
             crate::tr!(
-                format!("This file isn't a readable VoiceChat character: {e}"),
-                format!("无法读取该 VoiceChat 角色文件：{e}"),
+                format!("This file isn't a readable Voice Chat character: {e}"),
+                format!("无法读取该 Voice Chat 角色文件：{e}"),
             )
         })
     }
@@ -307,19 +307,19 @@ impl SharedCharacter {
     pub fn normalize(self) -> Result<Self, String> {
         if self.format != FORMAT {
             return Err(crate::tr!(
-                "This file isn't a VoiceChat character",
-                "这不是 VoiceChat 的角色文件",
+                "This file isn't a Voice Chat character",
+                "这不是 Voice Chat 的角色文件",
             )
             .into());
         }
         if self.version > VERSION {
             return Err(crate::tr!(
                 format!(
-                    "This character was shared from a newer version of VoiceChat (format v{}) — update the app first",
+                    "This character was shared from a newer version of Voice Chat (format v{}) — update the app first",
                     self.version
                 ),
                 format!(
-                    "该角色由更新版本的 VoiceChat 导出（格式 v{}），请先升级应用",
+                    "该角色由更新版本的 Voice Chat 导出（格式 v{}），请先升级应用",
                     self.version
                 ),
             ));
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn a_minimal_hand_written_file_imports() {
         let raw = r#"{
-            "format": "voicechat-character",
+            "format": "voice-chat-character",
             "version": 1,
             "name": "小柔",
             "voice": { "kind": "description", "prompt": "  温柔的女声  " }
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn points_a_backup_at_where_it_belongs() {
-        let backup = r#"{"format": "voicechat-backup", "version": 2}"#;
+        let backup = r#"{"format": "voice-chat-backup", "version": 2}"#;
         let err = SharedCharacter::parse(backup).expect_err("not a character");
         assert!(err.contains("Backup") || err.contains("备份"), "{err}");
 

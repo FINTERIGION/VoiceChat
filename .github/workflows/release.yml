@@ -40,7 +40,7 @@ jobs:
           fi
           {
             echo "body<<EOF_RELEASE_NOTES"
-            printf '%s\n' "${notes:-VoiceChat $GITHUB_REF_NAME}"
+            printf '%s\n' "${notes:-Voice Chat $GITHUB_REF_NAME}"
             echo "EOF_RELEASE_NOTES"
           } >> "$GITHUB_OUTPUT"
 
@@ -66,7 +66,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: VoiceChat ${{ github.ref_name }}
+          releaseName: Voice Chat ${{ github.ref_name }}
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           # The plain `windows-x86_64` entry in `latest.json` — what a copy

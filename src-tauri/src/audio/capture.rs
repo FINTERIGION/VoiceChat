@@ -81,7 +81,7 @@ pub fn start() -> Result<(CaptureControl, FrameReceiver, LevelReceiver), String>
     let capturing_cb = capturing.clone();
 
     let thread = thread::Builder::new()
-        .name("voicechat-capture".into())
+        .name("voice-chat-capture".into())
         .spawn(move || {
             let (mut prod, mut cons) = ring::spsc(device_hz as usize * 2);
 

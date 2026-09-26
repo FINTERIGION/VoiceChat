@@ -173,7 +173,7 @@ pub fn start() -> Result<PlaybackHandle, String> {
     let played_frames_cb = played_frames.clone();
 
     let thread = thread::Builder::new()
-        .name("voicechat-playback".into())
+        .name("voice-chat-playback".into())
         .spawn(move || {
             let priming_frames = (device_hz as u64 * PRIMING_MS / 1000) as usize;
             let (mut prod, mut cons) = ring::spsc(device_hz as usize * 2);

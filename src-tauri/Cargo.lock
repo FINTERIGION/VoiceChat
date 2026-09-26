@@ -5518,7 +5518,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "voicechat"
+name = "voice-chat"
 version = "0.1.0"
 dependencies = [
  "audioadapter-buffers",

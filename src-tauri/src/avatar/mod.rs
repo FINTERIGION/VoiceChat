@@ -236,7 +236,7 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!("voicechat-avatar-{}", uuid::Uuid::new_v4()));
+            let dir = std::env::temp_dir().join(format!("voice-chat-avatar-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).expect("create temp dir");
             Self(dir)
         }
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(ok.body(), PNG);
 
         assert_eq!(
-            serve(Some(&dir.0), "/../voicechat.db").status(),
+            serve(Some(&dir.0), "/../voice-chat.db").status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(serve(None, &format!("/{name}")).status(), StatusCode::NOT_FOUND);

@@ -1,7 +1,7 @@
 use keyring::Entry;
 use serde::Serialize;
 
-const SERVICE: &str = "VoiceChat";
+const SERVICE: &str = "Voice Chat";
 const USERNAME: &str = "dashscope";
 
 #[derive(Serialize)]

@@ -133,7 +133,7 @@ pub fn run() {
         .setup(|app| {
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
-            let conn = store::db::open(&app_dir.join("voicechat.db"))?;
+            let conn = store::db::open(&app_dir.join("voice-chat.db"))?;
             seed_default_character(&conn)?;
             seed_english_coach_character(&conn)?;
             // The session actor is spawned further down, so nothing is live

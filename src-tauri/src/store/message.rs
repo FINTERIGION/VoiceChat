@@ -300,7 +300,7 @@ mod tests {
     impl TempDb {
         fn new() -> Self {
             let path =
-                std::env::temp_dir().join(format!("voicechat-message-test-{}.db", Uuid::new_v4()));
+                std::env::temp_dir().join(format!("voice-chat-message-test-{}.db", Uuid::new_v4()));
             let conn = db::open(&path).expect("open");
             Self { path, conn }
         }

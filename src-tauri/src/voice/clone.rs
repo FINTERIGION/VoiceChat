@@ -42,7 +42,7 @@ pub fn start() -> Result<RecorderHandle, String> {
     let max_samples = MAX_RECORD_SECS as usize * sample_rate as usize * channels as usize;
 
     let thread = thread::Builder::new()
-        .name("voicechat-recorder".into())
+        .name("voice-chat-recorder".into())
         .spawn(move || {
             let err_fn = |e| tracing::error!("recorder stream error: {e}");
             let stream = match sample_format {

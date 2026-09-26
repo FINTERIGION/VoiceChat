@@ -18,7 +18,7 @@ fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let show = MenuItem::with_id(
         app,
         MENU_SHOW,
-        crate::tr!("Show VoiceChat", "显示主界面"),
+        crate::tr!("Show Voice Chat", "显示主界面"),
         true,
         None::<&str>,
     )?;
@@ -36,7 +36,7 @@ fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 /// user's language.
 pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip("VoiceChat")
+        .tooltip("Voice Chat")
         .menu(&menu(app)?)
         // Left click brings the window back; the menu is on right click.
         .show_menu_on_left_click(false)

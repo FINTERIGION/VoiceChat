@@ -12,7 +12,7 @@ export const zhCN: Messages = {
   "nav.settings": "设置",
 
   // ---- Update banner ----
-  "update.banner": "VoiceChat {version} 已发布。",
+  "update.banner": "Voice Chat {version} 已发布。",
   "update.view": "查看更新",
   "update.later": "稍后",
 
@@ -56,7 +56,7 @@ export const zhCN: Messages = {
   "chat.switchedNotice": "与「{name}」的对话已结束，并保存在 TA 的历史会话中",
 
   // ---- First run (no API key yet) ----
-  "onboarding.title": "欢迎使用 VoiceChat",
+  "onboarding.title": "欢迎使用 Voice Chat",
   "onboarding.body":
     "开始对话之前，需要先填入阿里云百炼（DashScope）的 API Key——语音识别、对话和语音合成都通过它完成。",
   "onboarding.step1": "在阿里云百炼控制台创建一个 API Key",

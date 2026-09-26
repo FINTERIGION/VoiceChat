@@ -914,7 +914,7 @@ fn backup_dialog(app: &AppHandle) -> tauri_plugin_dialog::FileDialogBuilder<taur
     let mut builder = app
         .dialog()
         .file()
-        .add_filter(crate::tr!("VoiceChat backup", "VoiceChat 备份"), &["json"]);
+        .add_filter(crate::tr!("Voice Chat backup", "Voice Chat 备份"), &["json"]);
     if let Some(window) = app.get_webview_window("main") {
         builder = builder.set_parent(&window);
     }
@@ -1000,7 +1000,7 @@ pub async fn export_backup(
     backup_dialog(&app)
         .set_title(crate::tr!("Back up characters", "备份角色"))
         .set_file_name(format!(
-            "voicechat-backup-{}.json",
+            "voice-chat-backup-{}.json",
             chrono::Local::now().format("%Y%m%d-%H%M")
         ))
         .save_file(move |path| {
@@ -1062,19 +1062,19 @@ pub async fn import_backup(
     let raw = read_picked(&path, MAX_BACKUP_BYTES, |mb| {
         crate::tr!(
             format!(
-                "That file is {mb} MB — too large to be a VoiceChat backup (the limit is {} MB)",
+                "That file is {mb} MB — too large to be a Voice Chat backup (the limit is {} MB)",
                 MAX_BACKUP_BYTES / 1_048_576
             ),
             format!(
-                "该文件有 {mb} MB，超出了 VoiceChat 备份的大小上限（{} MB）",
+                "该文件有 {mb} MB，超出了 Voice Chat 备份的大小上限（{} MB）",
                 MAX_BACKUP_BYTES / 1_048_576
             ),
         )
     })?;
     let mut parsed: backup::Backup = serde_json::from_str(&raw).map_err(|e| {
         crate::tr!(
-            format!("This file isn't a readable VoiceChat backup: {e}"),
-            format!("无法读取该 VoiceChat 备份文件：{e}"),
+            format!("This file isn't a readable Voice Chat backup: {e}"),
+            format!("无法读取该 Voice Chat 备份文件：{e}"),
         )
     })?;
     parsed.check_compatible()?;
@@ -1174,7 +1174,7 @@ fn character_file_dialog(app: &AppHandle) -> tauri_plugin_dialog::FileDialogBuil
     let mut builder = app
         .dialog()
         .file()
-        .add_filter(crate::tr!("VoiceChat character", "VoiceChat 角色"), &["json"]);
+        .add_filter(crate::tr!("Voice Chat character", "Voice Chat 角色"), &["json"]);
     if let Some(window) = app.get_webview_window("main") {
         builder = builder.set_parent(&window);
     }
@@ -1294,11 +1294,11 @@ pub async fn open_character_file(app: AppHandle) -> Result<Option<SharedCharacte
     let raw = read_picked(&path, MAX_CHARACTER_FILE_BYTES, |mb| {
         crate::tr!(
             format!(
-                "That file is {mb} MB — too large to be a VoiceChat character (the limit is {} MB)",
+                "That file is {mb} MB — too large to be a Voice Chat character (the limit is {} MB)",
                 MAX_CHARACTER_FILE_BYTES / 1_048_576
             ),
             format!(
-                "该文件有 {mb} MB，超出了 VoiceChat 角色文件的大小上限（{} MB）",
+                "该文件有 {mb} MB，超出了 Voice Chat 角色文件的大小上限（{} MB）",
                 MAX_CHARACTER_FILE_BYTES / 1_048_576
             ),
         )

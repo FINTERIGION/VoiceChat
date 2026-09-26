@@ -39,7 +39,7 @@ use crate::voice::sample;
 /// Stamped into every file and checked on the way back in, so picking the
 /// wrong JSON file fails with "this isn't a backup" instead of importing
 /// nothing and reporting success.
-pub const FORMAT: &str = "voicechat-backup";
+pub const FORMAT: &str = "voice-chat-backup";
 
 /// Bumped only when the shape changes such that an older build would misread
 /// a newer file. Import accepts anything up to this.
@@ -464,19 +464,19 @@ impl Backup {
     pub fn check_compatible(&self) -> Result<(), String> {
         if self.format != FORMAT {
             return Err(crate::tr!(
-                "This file isn't a VoiceChat backup",
-                "这不是 VoiceChat 的备份文件",
+                "This file isn't a Voice Chat backup",
+                "这不是 Voice Chat 的备份文件",
             )
             .into());
         }
         if self.version > VERSION {
             return Err(crate::tr!(
                 format!(
-                    "This backup was written by a newer version of VoiceChat (format v{}) — update the app first",
+                    "This backup was written by a newer version of Voice Chat (format v{}) — update the app first",
                     self.version
                 ),
                 format!(
-                    "该备份由更新版本的 VoiceChat 导出（格式 v{}），请先升级应用",
+                    "该备份由更新版本的 Voice Chat 导出（格式 v{}），请先升级应用",
                     self.version
                 ),
             ));
@@ -1015,7 +1015,7 @@ mod tests {
     impl TempDb {
         fn new() -> Self {
             let path = std::env::temp_dir()
-                .join(format!("voicechat-backup-test-{}.db", uuid::Uuid::new_v4()));
+                .join(format!("voice-chat-backup-test-{}.db", uuid::Uuid::new_v4()));
             let conn = db::open(&path).expect("open");
             Self { path, conn }
         }
@@ -1032,7 +1032,7 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let dir = std::env::temp_dir()
-                .join(format!("voicechat-backup-avatars-{}", uuid::Uuid::new_v4()));
+                .join(format!("voice-chat-backup-avatars-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).expect("create temp dir");
             Self(dir)
         }

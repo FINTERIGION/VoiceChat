@@ -1308,7 +1308,7 @@ function AboutSection() {
 
   return (
     <Card
-      title="VoiceChat"
+      title="Voice Chat"
       description={
         version !== undefined
           ? t("settings.about.version", { version })

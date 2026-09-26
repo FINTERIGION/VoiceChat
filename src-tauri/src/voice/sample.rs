@@ -245,7 +245,7 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let dir = std::env::temp_dir()
-                .join(format!("voicechat-voice-sample-{}", uuid::Uuid::new_v4()));
+                .join(format!("voice-chat-voice-sample-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).expect("create temp dir");
             Self(dir)
         }
@@ -321,7 +321,7 @@ mod tests {
         assert!(dir.0.join("notes.txt").exists());
 
         assert!(save(&dir.0, b"<svg onload=alert(1)>").is_err());
-        for bad in ["../voicechat.db", "sample.wav", "0f8fad5b-d9cb-469f-a165-70867728950e.png"] {
+        for bad in ["../voice-chat.db", "sample.wav", "0f8fad5b-d9cb-469f-a165-70867728950e.png"] {
             assert!(!is_valid_name(bad), "{bad:?}");
             assert!(read(&dir.0, bad).is_none());
         }

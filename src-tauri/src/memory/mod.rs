@@ -438,7 +438,7 @@ mod tests {
     impl TempDb {
         fn new() -> Self {
             let path = std::env::temp_dir()
-                .join(format!("voicechat-memory-test-{}.db", uuid::Uuid::new_v4()));
+                .join(format!("voice-chat-memory-test-{}.db", uuid::Uuid::new_v4()));
             let conn = db::open(&path).expect("open");
             Self { path, conn }
         }
